@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
+from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
 
-from .data import Company
+from .data import Company, History
 
 WEEKS = 13
 WEEKS_PER_MONTH = 52 / 12
 
 # Monte Carlo drivers: the uncertainty lives in collections, not in contractual
 # outflows (payroll, bills, opex are known). We perturb collection *timing* and
-# whether each invoice is realized, plus the size of future billings.
+# whether each invoice is realized, plus the size of future billings. Without a
+# Calibration (see calibrate()) these hardcoded fallbacks are used; with one,
+# the shape/spread/correlation come from history instead.
 SIM_SIGMA_DAYS = 10.0       # std dev of collection timing, in days
 SIM_SIGMA_BILLINGS = 0.12   # std dev of weekly billings, as a fraction
+SIM_BILLINGS_COMMON = 0.6   # share of billings variance that is systematic (shared with collections)
 
 
 @dataclass
@@ -184,12 +189,95 @@ def _percentile(sorted_vals: list[float], q: float) -> float:
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (idx - lo)
 
 
+@dataclass
+class Calibration:
+    """Monte Carlo inputs fitted from historical actuals (see calibrate())."""
+    lateness_residuals: list[int]  # actual days-late minus each customer's own mean; the empirical spread/skew
+    lateness_sd: float             # std dev of those residuals (scales the systematic timing shift)
+    median_days_late: float
+    p90_days_late: float
+    writeoff_rate: float           # $-weighted, from history
+    blended_collect_risk: float    # $-weighted collect_risk on the open book
+    realization_factor: float      # history write-off rate / blended risk (anchors realization to actuals)
+    billings_cv: float             # coefficient of variation of weekly billings
+    corr_billings_lateness: float  # Pearson corr: soft billings weeks pay slower (negative)
+    n_invoices: int
+    n_weeks: int
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    sy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    return cov / (sx * sy) if sx and sy else 0.0
+
+
+def calibrate(company: Company, history: History) -> Calibration:
+    """Fit the Monte Carlo's distributions from historical actuals.
+
+    - Collection timing: empirical lateness, centered per customer so the open
+      book keeps its own means but inherits history's real (right-skewed) spread.
+    - Realization: historical $-weighted write-off rate, anchored to the open
+      book's blended collect_risk.
+    - Billings: coefficient of variation and its correlation with collection
+      speed, so downturns hit receipts and timing together.
+    """
+    paid = [c for c in history.collections if c.paid_date]
+    by_cust: dict[str, list[int]] = defaultdict(list)
+    for c in paid:
+        dl = (date.fromisoformat(c.paid_date) - date.fromisoformat(c.due_date)).days
+        by_cust[c.customer].append(dl)
+    means = {k: statistics.fmean(v) for k, v in by_cust.items()}
+    residuals, all_late = [], []
+    for c in paid:
+        dl = (date.fromisoformat(c.paid_date) - date.fromisoformat(c.due_date)).days
+        residuals.append(int(round(dl - means[c.customer])))
+        all_late.append(dl)
+    all_late.sort()
+
+    total_amt = sum(c.amount for c in history.collections) or 1.0
+    writeoff_rate = sum(c.amount for c in history.collections if c.written_off) / total_amt
+    open_amt = sum(i.amount for i in company.invoices) or 1.0
+    blended = sum(i.amount * i.collect_risk for i in company.invoices) / open_amt
+    # History anchors realization but only within a guardrail: the per-customer
+    # collect_risk still carries the shape; a book/history mix difference (e.g. a
+    # riskier open book) can't swing effective risk more than ±25%.
+    realization_factor = min(1.25, max(0.8, writeoff_rate / blended)) if blended > 0 else 1.0
+
+    bvals = [b.billings for b in history.billings]
+    lvals = [b.avg_days_late for b in history.billings]
+    bmean = statistics.fmean(bvals) if bvals else 1.0
+    billings_cv = (statistics.pstdev(bvals) / bmean) if bmean and len(bvals) > 1 else SIM_SIGMA_BILLINGS
+
+    return Calibration(
+        lateness_residuals=residuals or [0],
+        lateness_sd=statistics.pstdev(residuals) if len(residuals) > 1 else SIM_SIGMA_DAYS,
+        median_days_late=round(_percentile(all_late, 0.50), 1),
+        p90_days_late=round(_percentile(all_late, 0.90), 1),
+        writeoff_rate=round(writeoff_rate, 4),
+        blended_collect_risk=round(blended, 4),
+        realization_factor=round(realization_factor, 3),
+        billings_cv=round(billings_cv, 4),
+        corr_billings_lateness=round(_pearson(bvals, lvals), 3),
+        n_invoices=len(history.collections),
+        n_weeks=len(history.billings),
+    )
+
+
 def simulate(company: Company, scenario: Scenario | None = None,
-             n: int = 2000, seed: int = 12345) -> dict:
+             n: int = 2000, seed: int = 12345, calibration: "Calibration | None" = None) -> dict:
     """Monte Carlo on collection timing + realization and billings size.
 
     Contractual outflows (payroll, AP, opex) are taken from the deterministic
     build and held fixed; the spread comes from when/whether cash is collected.
+    With a Calibration, timing is bootstrapped from the empirical (right-skewed)
+    lateness residuals, realization is anchored to historical write-offs, and a
+    per-run demand factor couples soft billings to slower collections via the
+    historical correlation; without one, symmetric hardcoded fallbacks are used.
     Returns per-week P10/P50/P90 ending-cash bands and breach probabilities.
     Seeded, so the dashboard is reproducible across rebuilds.
     """
@@ -201,22 +289,35 @@ def simulate(company: Company, scenario: Scenario | None = None,
     lag_weeks = math.ceil((company.dso_days + sc.collections_delay_days) / 7)
     base_weekly = company.base_weekly_billings * (1 + sc.billings_change_pct)
 
+    cal = calibration
+    residuals = cal.lateness_residuals if cal else None
+    lateness_sd = cal.lateness_sd if cal else SIM_SIGMA_DAYS
+    billings_cv = cal.billings_cv if cal else SIM_SIGMA_BILLINGS
+    rho = cal.corr_billings_lateness if cal else 0.0
+    realization_factor = cal.realization_factor if cal else 1.0
+    nres = len(residuals) if residuals else 0
+
     rng = random.Random(seed)
     paths: list[list[float]] = []
     for _ in range(n):
+        z = rng.gauss(0, 1)  # the run's demand/liquidity condition
+        billings_factor = max(0.3, 1 + SIM_BILLINGS_COMMON * billings_cv * z)
+        timing_shift = (-rho) * lateness_sd * z  # soft demand (z<0) -> later collections
         receipts = [0.0] * WEEKS
         for inv in company.invoices:
             due = date.fromisoformat(inv.due_date)
-            days = inv.typical_days_late + sc.collections_delay_days + round(rng.gauss(0, SIM_SIGMA_DAYS))
-            wk = _week_idx(due + timedelta(days=days), start)
+            resid = residuals[rng.randrange(nres)] if residuals else rng.gauss(0, lateness_sd)
+            days = inv.typical_days_late + sc.collections_delay_days + timing_shift + resid
+            wk = _week_idx(due + timedelta(days=round(days)), start)
             if wk >= WEEKS:
                 continue
-            p_collect = 1 - min(1.0, inv.collect_risk * sc.bad_debt_multiplier)
+            p_collect = 1 - min(1.0, inv.collect_risk * sc.bad_debt_multiplier * realization_factor)
             if rng.random() < p_collect:
                 receipts[wk] += inv.amount
         for w in range(WEEKS):
             if w + lag_weeks < WEEKS:
-                receipts[w + lag_weeks] += max(0.0, base_weekly * (1 + rng.gauss(0, SIM_SIGMA_BILLINGS)))
+                idio = rng.gauss(0, billings_cv * (1 - SIM_BILLINGS_COMMON))
+                receipts[w + lag_weeks] += max(0.0, base_weekly * billings_factor * (1 + idio))
         cash = company.opening_cash
         path = []
         for w in range(WEEKS):

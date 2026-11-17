@@ -36,6 +36,30 @@ class Recurring:
 
 
 @dataclass
+class CollectionRecord:
+    """A historical invoice and when it actually paid (or was written off)."""
+    customer: str
+    due_date: str          # ISO
+    paid_date: str | None  # ISO, or None if written off
+    amount: float
+    written_off: bool
+
+
+@dataclass
+class BillingsWeek:
+    """A historical week of new billings and the collection lateness realized that week."""
+    week_start: str  # ISO
+    billings: float
+    avg_days_late: float
+
+
+@dataclass
+class History:
+    collections: list[CollectionRecord] = field(default_factory=list)
+    billings: list[BillingsWeek] = field(default_factory=list)
+
+
+@dataclass
 class Company:
     name: str
     as_of: str
@@ -96,6 +120,35 @@ def generate(seed: int = 7) -> Company:
         monthly_net_new_arr=800_000,
         invoices=inv, bills=bills, recurring=recurring,
     )
+
+
+def generate_history(seed: int = 11, weeks: int = 78, invoices: int = 220) -> History:
+    """Dummy ~18 months of actuals used to CALIBRATE the Monte Carlo.
+
+    Built so there is real structure to recover: collection lateness is
+    right-skewed (customers drag far more than they prepay), write-offs track
+    customer risk, and a shared weekly demand factor makes billings and
+    collection speed move together (soft weeks bill less AND pay slower).
+    """
+    rng = random.Random(seed)
+    bweeks: list[BillingsWeek] = []
+    start = AS_OF - timedelta(days=7 * weeks)
+    for w in range(weeks):
+        z = rng.gauss(0, 1)  # that week's demand/liquidity condition
+        billings = max(0.0, 300_000 * (1 + 0.14 * z) + rng.gauss(0, 12_000))
+        avg_late = max(0.0, 11 - 4.5 * z + rng.gauss(0, 2))  # slower when z is low -> neg corr
+        bweeks.append(BillingsWeek((start + timedelta(days=7 * w)).isoformat(),
+                                   round(billings, -2), round(avg_late, 1)))
+    cols: list[CollectionRecord] = []
+    for _ in range(invoices):
+        cust, risk = rng.choice(CUSTOMERS)
+        due = AS_OF - timedelta(days=rng.randint(30, 7 * weeks))
+        days_late = int(round(max(0.0, rng.gauss(9, 5)) + rng.expovariate(1 / 8)))  # right tail
+        written = rng.random() < risk
+        paid = None if written else (due + timedelta(days=days_late)).isoformat()
+        cols.append(CollectionRecord(cust, due.isoformat(), paid,
+                                     round(rng.uniform(20_000, 260_000), -2), written))
+    return History(cols, bweeks)
 
 
 def save(company: Company, path: Path) -> None:
@@ -175,6 +228,12 @@ def export_csvs(c: Company, outdir: Path) -> None:
             ["base_weekly_billings", c.base_weekly_billings], ["dso_days", c.dso_days],
             ["weekly_vendor_run_rate", c.weekly_vendor_run_rate],
             ["monthly_net_new_arr", c.monthly_net_new_arr]])
+    hist = generate_history()
+    _write(outdir / "collections_history.csv", ["Customer", "Due Date", "Paid Date", "Amount", "Status"],
+           [[r.customer, _qb(r.due_date), (_qb(r.paid_date) if r.paid_date else ""),
+             f"{r.amount:.2f}", "Written Off" if r.written_off else "Paid"] for r in hist.collections])
+    _write(outdir / "billings_history.csv", ["Week Start", "Billings", "Avg Days Late"],
+           [[_qb(b.week_start), f"{b.billings:.2f}", b.avg_days_late] for b in hist.billings])
 
 
 def load_csvs(d: Path) -> Company:
@@ -207,3 +266,23 @@ def load_csvs(d: Path) -> Company:
         weekly_vendor_run_rate=float(a.get("weekly_vendor_run_rate", 0)),
         monthly_net_new_arr=float(a.get("monthly_net_new_arr", 0)),
         invoices=invoices, bills=bills, recurring=recurring)
+
+
+def load_history(d: Path) -> History | None:
+    """Load historical actuals for calibration. Returns None if not present."""
+    cfile, bfile = d / "collections_history.csv", d / "billings_history.csv"
+    if not (cfile.exists() and bfile.exists()):
+        return None
+
+    def rows(path):
+        with open(path, newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    cols = [CollectionRecord(
+        r["Customer"], _iso(r["Due Date"]),
+        _iso(r["Paid Date"]) if r.get("Paid Date", "").strip() else None,
+        _money(r["Amount"]), r["Status"].strip().lower().startswith("written"))
+        for r in rows(cfile)]
+    bills = [BillingsWeek(_iso(r["Week Start"]), _money(r["Billings"]), float(r["Avg Days Late"]))
+             for r in rows(bfile)]
+    return History(cols, bills)

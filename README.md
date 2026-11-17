@@ -28,8 +28,11 @@ python -m runway.cli chat                     # multi-turn
 A static 13-week runway dashboard lives in `docs/`:
 
 - **KPI tiles** — opening/week-13/lowest cash, probability of breaching the policy, runway, policy status.
-- **Ending-cash chart** with a **Monte Carlo P10–P90 confidence band** (2,000 runs over collection
-  timing/realization and billings size) around the expected line, plus the min-cash policy threshold.
+- **Ending-cash chart** with a **Monte Carlo P10–P90 confidence band** (2,000 runs) around the
+  expected line, plus the min-cash policy threshold and a probability-of-breach readout.
+- **How the band is built** — the Monte Carlo is **calibrated from historical actuals** (see below),
+  not guessed: empirical right-skewed collection timing, write-off-anchored realization, and a
+  collections↔billings correlation so correlated downturns widen the downside tail.
 - **Burn & efficiency** — net vs gross monthly burn, runway to the policy floor and to $0, and
   **burn multiple** (net burn ÷ net-new ARR).
 - **Weekly sources & uses** — stacked inflows/outflows with a net-flow overlay.
@@ -59,13 +62,18 @@ same reports from QuickBooks into `data/private/` (gitignored) and run
 | `bank_balances.csv` | Balance Sheet, bank accounts |
 | `payroll_register.csv` | Payroll history (biweekly) |
 | `recurring_expenses.csv`, `customer_terms.csv`, `assumptions.csv` | Finance team inputs |
+| `collections_history.csv` | ~18 mo of invoices with actual paid dates / write-offs (**calibrates the Monte Carlo**) |
+| `billings_history.csv` | Weekly billings + realized collection lateness (fits billings volatility + correlation) |
+
+The two history files are optional: if absent, `simulate()` falls back to symmetric hardcoded
+spreads. Present, `forecast.calibrate()` fits the band to them.
 
 ## How it works
 
 | File | Role |
 |---|---|
 | `runway/data.py` | Synthetic company: open AR, AP bills, payroll, recurring opex, billings run-rate |
-| `runway/forecast.py` | Weekly cash engine + scenario levers (collections delay, billings %, opex %, hires, bad debt, one-time items) |
+| `runway/forecast.py` | Weekly cash engine + scenario levers, burn/runway metrics, `calibrate()` + Monte Carlo `simulate()` |
 | `runway/agent.py` | Claude tool-use loop (`run_scenario`, `compare_presets`, `ar_risk`) with guardrails |
 | `runway/cli.py` | CLI entry point |
 
@@ -79,5 +87,6 @@ same reports from QuickBooks into `data/private/` (gitignored) and run
 ## Roadmap
 
 - Pull live AR/AP/bank balances via QuickBooks and Ramp MCP connectors
-- Monte Carlo on collection timing for a probability of breach
+- ~~Monte Carlo on collection timing for a probability of breach~~ — done; now history-calibrated
+- Per-customer / seasonal calibration and actual-vs-forecast variance tracking
 - Weekly scheduled run that posts the forecast to Slack

@@ -20,26 +20,35 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 sys.path.insert(0, str(ROOT))
 
+from dataclasses import asdict  # noqa: E402
+
 from runway import data, forecast as fc  # noqa: E402
 
 
 def build_payload(data_dir: pathlib.Path) -> dict:
     company = data.load_csvs(data_dir)
+    history = data.load_history(data_dir)
+    calibration = fc.calibrate(company, history) if history else None
+    cal_summary = None
+    if calibration:
+        cal_summary = asdict(calibration)
+        cal_summary.pop("lateness_residuals", None)  # large array; dashboard needs only the fitted stats
     payload = {
         "as_of": company.as_of,
         "min_cash_policy": company.min_cash_policy,
         "opening_cash": company.opening_cash,
+        "monthly_net_new_arr": round(company.monthly_net_new_arr),
+        "calibration": cal_summary,
         "scenarios": {},
         "compare": fc.compare(company, list(fc.PRESETS)),
         "ar_risk": fc.ar_risk(company)[:8],
     }
-    payload["monthly_net_new_arr"] = round(company.monthly_net_new_arr)
     for name in fc.PRESETS:
         res = fc.build(company, fc.PRESETS[name])
         payload["scenarios"][name] = {
             "rows": res["rows"],
             "summary": res["summary"],
-            "band": fc.simulate(company, fc.PRESETS[name]),
+            "band": fc.simulate(company, fc.PRESETS[name], calibration=calibration),
         }
     return payload
 
