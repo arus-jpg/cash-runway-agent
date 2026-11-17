@@ -42,6 +42,15 @@ def test_one_time_outflow_hits_week():
     assert fc.build(c, sc)["rows"][5]["ending_cash"] == base - 1_000_000
 
 
+def test_csv_roundtrip(tmp_path):
+    c = co()
+    data.export_csvs(c, tmp_path)
+    loaded = data.load_csvs(tmp_path)
+    assert fc.build(c)["summary"]["ending_cash_week13"] == fc.build(loaded)["summary"]["ending_cash_week13"] \
+        or abs(fc.build(c)["summary"]["ending_cash_week13"] - fc.build(loaded)["summary"]["ending_cash_week13"]) < 50_000
+    assert len(loaded.invoices) == len(c.invoices) and len(loaded.bills) == len(c.bills)
+
+
 def test_agent_tool_dispatch_no_api_needed():
     c = co()
     out = agent.execute_tool(c, "run_scenario", {"collections_delay_days": 30, "new_hires": 5})

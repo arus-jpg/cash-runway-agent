@@ -107,3 +107,99 @@ def load(path: Path) -> Company:
     d["bills"] = [Bill(**x) for x in d["bills"]]
     d["recurring"] = [Recurring(**x) for x in d["recurring"]]
     return Company(**d)
+
+
+# ---------------------------------------------------------------------------
+# QuickBooks-style CSV import/export
+#   ar_aging_detail.csv   <- QB report "A/R Aging Detail"      (open invoices)
+#   ap_aging_detail.csv   <- QB report "A/P Aging Detail"      (unpaid bills)
+#   bank_balances.csv     <- QB "Balance Sheet" bank accounts
+#   payroll_register.csv  <- payroll provider / QB payroll history
+#   recurring_expenses.csv, customer_terms.csv, assumptions.csv <- finance team inputs
+# Dates are MM/DD/YYYY, as QuickBooks exports them.
+# ---------------------------------------------------------------------------
+import csv
+from datetime import datetime
+
+QB_FMT = "%m/%d/%Y"
+
+
+def _qb(iso: str) -> str:
+    return date.fromisoformat(iso).strftime(QB_FMT)
+
+
+def _iso(qb: str) -> str:
+    return datetime.strptime(qb.strip(), QB_FMT).date().isoformat()
+
+
+def _money(s: str) -> float:
+    return float(s.replace("$", "").replace(",", "").strip() or 0)
+
+
+def _write(path: Path, header: list[str], rows: list[list]) -> None:
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(header)
+        w.writerows(rows)
+
+
+def export_csvs(c: Company, outdir: Path) -> None:
+    outdir.mkdir(parents=True, exist_ok=True)
+    as_of = date.fromisoformat(c.as_of)
+    _write(outdir / "ar_aging_detail.csv",
+           ["Customer", "Num", "Invoice Date", "Due Date", "Open Balance"],
+           [[i.customer, f"INV-{1000 + n}", _qb((date.fromisoformat(i.due_date) - timedelta(days=30)).isoformat()),
+             _qb(i.due_date), f"{i.amount:.2f}"] for n, i in enumerate(c.invoices)])
+    _write(outdir / "ap_aging_detail.csv",
+           ["Vendor", "Num", "Bill Date", "Due Date", "Open Balance"],
+           [[b.vendor, f"BILL-{5000 + n}", _qb((date.fromisoformat(b.due_date) - timedelta(days=30)).isoformat()),
+             _qb(b.due_date), f"{b.amount:.2f}"] for n, b in enumerate(c.bills)])
+    operating = round(c.opening_cash * 0.8, 2)
+    _write(outdir / "bank_balances.csv", ["Account", "Balance"],
+           [["Operating Checking (...1234)", f"{operating:.2f}"],
+            ["Money Market (...5678)", f"{c.opening_cash - operating:.2f}"]])
+    last = date.fromisoformat(c.first_payroll_date) - timedelta(days=14)
+    _write(outdir / "payroll_register.csv", ["Pay Date", "Total Payroll Cost"],
+           [[_qb((last - timedelta(days=14 * k)).isoformat()), f"{c.payroll_per_period:.2f}"] for k in range(5, -1, -1)])
+    _write(outdir / "recurring_expenses.csv", ["Name", "Amount", "Frequency", "Day of Month", "Category"],
+           [[r.name, f"{r.amount:.2f}", r.frequency, r.day_of_month, r.category] for r in c.recurring])
+    by_cust: dict[str, list[Invoice]] = {}
+    for i in c.invoices:
+        by_cust.setdefault(i.customer, []).append(i)
+    _write(outdir / "customer_terms.csv", ["Customer", "Typical Days Late", "Collect Risk"],
+           [[k, round(sum(i.typical_days_late for i in v) / len(v)), v[0].collect_risk] for k, v in sorted(by_cust.items())])
+    _write(outdir / "assumptions.csv", ["Key", "Value"],
+           [["company_name", c.name], ["as_of", _qb(c.as_of)], ["min_cash_policy", c.min_cash_policy],
+            ["base_weekly_billings", c.base_weekly_billings], ["dso_days", c.dso_days],
+            ["weekly_vendor_run_rate", c.weekly_vendor_run_rate]])
+
+
+def load_csvs(d: Path) -> Company:
+    def rows(name):
+        with open(d / name, newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    a = {r["Key"]: r["Value"] for r in rows("assumptions.csv")}
+    as_of = _iso(a["as_of"])
+    terms = {r["Customer"]: (int(float(r["Typical Days Late"])), float(r["Collect Risk"]))
+             for r in rows("customer_terms.csv")}
+    default_terms = (10, 0.05)  # unknown customers: 10 days late, 5% risk
+    invoices = [Invoice(r["Customer"], _money(r["Open Balance"]), _iso(r["Due Date"]), *terms.get(r["Customer"], default_terms))
+                for r in rows("ar_aging_detail.csv")]
+    bills = [Bill(r["Vendor"], _money(r["Open Balance"]), _iso(r["Due Date"])) for r in rows("ap_aging_detail.csv")]
+    cash = sum(_money(r["Balance"]) for r in rows("bank_balances.csv"))
+    pay = sorted((date.fromisoformat(_iso(r["Pay Date"])), _money(r["Total Payroll Cost"])) for r in rows("payroll_register.csv"))
+    recent = pay[-4:]
+    next_pay = pay[-1][0] + timedelta(days=14)
+    while next_pay < date.fromisoformat(as_of):
+        next_pay += timedelta(days=14)
+    recurring = [Recurring(r["Name"], _money(r["Amount"]), r["Frequency"], int(r["Day of Month"]), r["Category"])
+                 for r in rows("recurring_expenses.csv")]
+    return Company(
+        name=a.get("company_name", "Company"), as_of=as_of, opening_cash=cash,
+        min_cash_policy=float(a["min_cash_policy"]),
+        payroll_per_period=sum(x[1] for x in recent) / len(recent),
+        first_payroll_date=next_pay.isoformat(),
+        base_weekly_billings=float(a["base_weekly_billings"]), dso_days=int(float(a["dso_days"])),
+        weekly_vendor_run_rate=float(a.get("weekly_vendor_run_rate", 0)),
+        invoices=invoices, bills=bills, recurring=recurring)

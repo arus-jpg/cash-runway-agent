@@ -23,6 +23,20 @@ python -m runway.cli ask "Can we afford 12 hires in week 3 if collections slip 2
 python -m runway.cli chat                     # multi-turn
 ```
 
+## Data: dummy QuickBooks CSVs
+
+The demo reads QuickBooks-style CSVs from `data/sample/` (all dummy). To run on real data, export the
+same reports from QuickBooks into `data/private/` (gitignored) and run
+`python -m runway.cli --data-dir data/private forecast`.
+
+| File | QuickBooks source |
+|---|---|
+| `ar_aging_detail.csv` | Reports > A/R Aging Detail |
+| `ap_aging_detail.csv` | Reports > A/P Aging Detail |
+| `bank_balances.csv` | Balance Sheet, bank accounts |
+| `payroll_register.csv` | Payroll history (biweekly) |
+| `recurring_expenses.csv`, `customer_terms.csv`, `assumptions.csv` | Finance team inputs |
+
 ## How it works
 
 | File | Role |

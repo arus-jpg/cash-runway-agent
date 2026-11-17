@@ -3,4 +3,6 @@ __pycache__/
 .venv/
 .env
 .pytest_cache/
-*.csv
+# real company exports never go in git; dummy samples in data/sample are fine
+data/private/
+out/

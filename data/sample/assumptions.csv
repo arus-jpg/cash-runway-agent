@@ -1,0 +1,7 @@
+Key,Value
+company_name,Acme Robotics (synthetic)
+as_of,11/16/2026
+min_cash_policy,3000000
+base_weekly_billings,300000
+dso_days,48
+weekly_vendor_run_rate,120000

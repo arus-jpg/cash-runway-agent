@@ -8,7 +8,8 @@ from pathlib import Path
 
 from . import data, forecast as fc
 
-DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "company.json"
+SAMPLE_DIR = Path(__file__).resolve().parent.parent / "data" / "sample"
+DATA_DIR = SAMPLE_DIR  # overridden by --data-dir
 
 
 def m(x) -> str:
@@ -18,9 +19,9 @@ def m(x) -> str:
 
 
 def load() -> data.Company:
-    if not DATA_PATH.exists():
-        data.save(data.generate(), DATA_PATH)
-    return data.load(DATA_PATH)
+    if not (DATA_DIR / "assumptions.csv").exists():
+        data.export_csvs(data.generate(), SAMPLE_DIR)
+    return data.load_csvs(DATA_DIR)
 
 
 def print_forecast(res: dict, company: data.Company) -> None:
@@ -38,8 +39,9 @@ def print_forecast(res: dict, company: data.Company) -> None:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="runway")
+    p.add_argument("--data-dir", help="folder of QuickBooks-style CSVs (default: data/sample)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("generate", help="regenerate synthetic data")
+    sub.add_parser("generate", help="regenerate the dummy QuickBooks CSVs in data/sample")
     f = sub.add_parser("forecast", help="show 13-week forecast")
     f.add_argument("--scenario", default="base", choices=list(fc.PRESETS))
     f.add_argument("--csv", help="also write rows to this CSV path")
@@ -51,9 +53,12 @@ def main(argv=None) -> int:
     sub.add_parser("chat", help="interactive agent chat")
     args = p.parse_args(argv)
 
+    global DATA_DIR
+    if args.data_dir:
+        DATA_DIR = Path(args.data_dir)
     if args.cmd == "generate":
-        data.save(data.generate(), DATA_PATH)
-        print(f"Wrote {DATA_PATH}")
+        data.export_csvs(data.generate(), SAMPLE_DIR)
+        print(f"Wrote dummy QuickBooks CSVs to {SAMPLE_DIR}")
         return 0
     company = load()
     if args.cmd == "forecast":
