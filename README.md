@@ -23,6 +23,21 @@ python -m runway.cli ask "Can we afford 12 hires in week 3 if collections slip 2
 python -m runway.cli chat                     # multi-turn
 ```
 
+## Dashboard (GitHub Pages)
+
+A static 13-week runway dashboard lives in `docs/` — KPI tiles, an ending-cash chart with
+the min-cash policy line, a weekly cash-flow table, scenario comparison, and top AR risks.
+It reads `docs/data.json`, so regenerating the forecast refreshes the page:
+
+```bash
+py scripts/build_dashboard.py                      # writes docs/data.json from data/sample
+py scripts/build_dashboard.py --data-dir data/private   # or from your real export
+python -m http.server -d docs 8000                 # preview at http://localhost:8000
+```
+
+Publish by enabling **GitHub Pages → Deploy from branch → `main` / `/docs`**. The page also
+opens directly from disk (it embeds an inline-data fallback).
+
 ## Data: dummy QuickBooks CSVs
 
 The demo reads QuickBooks-style CSVs from `data/sample/` (all dummy). To run on real data, export the
