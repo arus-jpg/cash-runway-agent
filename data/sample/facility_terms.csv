@@ -1,0 +1,20 @@
+Key,Value,Description
+lender_name,Illustrative ABL Lender,Lender / agent shown on the package
+facility_status,ILLUSTRATIVE,"Set to EXECUTED once real terms from the credit agreement are entered; anything else prints a DRAFT banner"
+commitment,2000000,Revolving commitment (maximum facility size)
+advance_rate,0.85,Advance rate on Eligible Accounts
+ineligible_days,90,Accounts more than this many days past invoice date are ineligible
+cross_age_pct,0.50,"If this share of a customer's A/R is past the ineligible-days limit, all of that customer's A/R is ineligible"
+concentration_limit,0.25,Max share of total eligible A/R from one customer (excess is ineligible)
+gov_concentration_limit,0.50,Concentration limit for U.S. Government accounts with an Assignment of Claims on file
+availability_block,250000,Reserve deducted from the borrowing base
+sofr,0.043,Term SOFR assumption for the forecast window
+margin,0.03,Applicable margin over SOFR on drawn balances
+unused_fee,0.00375,Annual fee on the undrawn commitment
+opening_loan,750000,Revolver balance outstanding at the as-of date
+days_accrued,15,Days of interest and unused fee accrued but unpaid at the as-of date (paid monthly in arrears on the 1st)
+min_liquidity,3000000,Covenant: unrestricted cash + availability must stay at or above this every week
+min_excess_availability,150000,Covenant: availability must stay at or above this every week
+fccr_trigger_pct,0.125,Springing FCCR test applies if availability falls below this share of the commitment
+variance_receipts_min,0.85,Permitted variance: rolling 4-week receipts must be at least this share of forecast
+variance_disb_max,1.15,Permitted variance: rolling 4-week operating disbursements must be at most this share of forecast

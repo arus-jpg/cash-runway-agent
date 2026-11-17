@@ -1,49 +1,71 @@
-"""Driver-based 13-week cash forecast with scenario levers."""
+"""13-week cash flow in lender format, with the revolver, borrowing base and covenants.
+
+Operating lines (receipts, disbursements, one-time items) come from the schedules
+below. Everything financing-related is then solved week by week, in an order with no
+circularity, and the Excel export rebuilds that same order in live formulas:
+
+  1. A/R roll-forward: beginning + billings - collections - write-offs
+  2. Projected borrowing base: ending A/R x as-of eligible % x advance rate - reserves
+  3. Interest and unused fee: accrue on the week's beginning loan balance,
+     paid in arrears in the week that contains the 1st of the month
+  4. Cash before revolver = beginning cash + operating flows - interest/fees paid
+  5. Draw to hold minimum operating cash (capped at availability); repay any
+     over-advance and sweep cash above min cash + buffer
+  6. Availability = min(commitment, borrowing base) - loan; liquidity = cash + availability
+"""
 from __future__ import annotations
 
-import math
-import random
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 
+from . import borrowing_base as bb
 from .data import Company
 
 WEEKS = 13
-WEEKS_PER_MONTH = 52 / 12
 
-# Monte Carlo drivers: the uncertainty lives in collections, not in contractual
-# outflows (payroll, bills, opex are known). We perturb collection *timing* and
-# whether each invoice is realized, plus the size of future billings.
-SIM_SIGMA_DAYS = 10.0       # std dev of collection timing, in days
-SIM_SIGMA_BILLINGS = 0.12   # std dev of weekly billings, as a fraction
+RECEIPT_LINES = [("collections_ar", "Collections - existing A/R"),
+                 ("collections_new", "Collections - new billings")]
+DISB_LINES = [("payroll", "Payroll"), ("benefits", "Benefits"), ("vendors", "Vendors / A/P"),
+              ("facilities", "Rent & facilities"), ("technology", "Technology / SaaS"),
+              ("insurance", "Insurance"), ("taxes", "Taxes"), ("other_disb", "Other operating")]
+DISB_KEYS = [k for k, _ in DISB_LINES]
 
 
 @dataclass
 class Scenario:
     name: str = "base"
+    label: str = "Base case"
     collections_delay_days: int = 0      # extra days customers take to pay
     billings_change_pct: float = 0.0     # change in new weekly billings, e.g. -0.2
-    opex_change_pct: float = 0.0         # change in recurring opex, e.g. -0.1
-    new_hires: int = 0                   # incremental headcount
-    hire_start_week: int = 4
-    hire_monthly_cost: float = 18_000    # fully loaded per hire per month
-    one_time_items: list[tuple[int, float, str]] = field(default_factory=list)  # (week, amount, label); negative = outflow
+    opex_change_pct: float = 0.0         # change in recurring opex and vendor run-rate
     bad_debt_multiplier: float = 1.0     # scales each invoice's non-collection risk
+    stalled_customers: list[str] = field(default_factory=list)  # pay nothing in the window
+    one_time_items: list[tuple[int, float, str]] = field(default_factory=list)  # (week 1-13, amount, label); negative = outflow
 
 
-PRESETS: dict[str, Scenario] = {
-    "base": Scenario("base"),
-    "slow_collections": Scenario("slow_collections", collections_delay_days=15),
-    "revenue_down_20": Scenario("revenue_down_20", billings_change_pct=-0.20),
-    "hiring_plan": Scenario("hiring_plan", new_hires=12, hire_start_week=3),
-    "cost_cut_10": Scenario("cost_cut_10", opex_change_pct=-0.10),
-    "downside": Scenario("downside", collections_delay_days=15, billings_change_pct=-0.20,
-                         bad_debt_multiplier=2.0),
-}
+def largest_customer(company: Company) -> tuple[str, float]:
+    by: dict[str, float] = {}
+    for i in company.invoices:
+        by[i.customer] = by.get(i.customer, 0.0) + i.amount
+    name = max(by, key=by.get)
+    return name, by[name] / sum(by.values())
+
+
+def presets(company: Company) -> dict[str, Scenario]:
+    big, share = largest_customer(company)
+    return {
+        "base": Scenario("base", "Base case"),
+        "slow_collections": Scenario("slow_collections", "Collections +15 days", collections_delay_days=15),
+        "billings_down_20": Scenario("billings_down_20", "Billings -20%", billings_change_pct=-0.20),
+        "lose_largest_customer": Scenario(
+            "lose_largest_customer", f"Loss of largest customer ({big})",
+            stalled_customers=[big], billings_change_pct=-round(share, 4)),
+        "downside": Scenario("downside", "Downside (slow + billings -20% + 2x bad debt)",
+                             collections_delay_days=15, billings_change_pct=-0.20, bad_debt_multiplier=2.0),
+    }
 
 
 def _week_idx(d: date, start: date) -> int:
-    """Week bucket for a date; anything before week 0 lands in week 0."""
     return max(0, (d - start).days // 7)
 
 
@@ -57,213 +79,200 @@ def _recurring_dates(freq: str, dom: int, start: date, end: date):
         d = date(d.year + (d.month == 12), (d.month % 12) + 1, 1)
 
 
-def build(company: Company, scenario: Scenario | None = None) -> dict:
-    sc = scenario or Scenario()
+def week_dates(company: Company) -> list[tuple[date, date]]:
+    start = date.fromisoformat(company.as_of)
+    return [(start + timedelta(days=7 * w), start + timedelta(days=7 * w + 6)) for w in range(WEEKS)]
+
+
+def operating_schedule(company: Company, sc: Scenario) -> dict[str, list[float]]:
+    """Weekly operating lines plus the A/R roll drivers (billings, write-offs)."""
     start = date.fromisoformat(company.as_of)
     end = start + timedelta(days=WEEKS * 7 - 1)
-    receipts = [0.0] * WEEKS
-    payroll = [0.0] * WEEKS
-    ap = [0.0] * WEEKS
-    opex = [0.0] * WEEKS
-    other = [0.0] * WEEKS
+    z = lambda: [0.0] * WEEKS  # noqa: E731
+    s = {k: z() for k, _ in RECEIPT_LINES + DISB_LINES}
+    s.update(one_time=z(), billings=z(), write_offs=z())
 
-    # Collections on open AR
+    # Existing A/R: expected pay date = due + customer's typical lateness + scenario delay.
+    # Invoices already past that date are spread evenly over weeks 1-4 rather than all
+    # landing in week 1 (a lender will not accept a week-1 catch-up of every past-due item).
+    # The expected loss (collect_risk) is written off in the same week the cash lands.
     for inv in company.invoices:
-        due = date.fromisoformat(inv.due_date)
-        expected = due + timedelta(days=inv.typical_days_late + sc.collections_delay_days)
-        wk = _week_idx(expected, start)
-        p_collect = 1 - min(1.0, inv.collect_risk * sc.bad_debt_multiplier)
-        if wk < WEEKS:
-            receipts[wk] += inv.amount * p_collect
+        if inv.customer in sc.stalled_customers:
+            continue
+        expected = date.fromisoformat(inv.due_date) + timedelta(days=inv.typical_days_late + sc.collections_delay_days)
+        p = 1 - min(1.0, inv.collect_risk * sc.bad_debt_multiplier)
+        weeks = [_week_idx(expected, start)] if expected >= start else [0, 1, 2, 3]
+        for wk in weeks:
+            if wk < WEEKS:
+                s["collections_ar"][wk] += inv.amount * p / len(weeks)
+                s["write_offs"][wk] += inv.amount * (1 - p) / len(weeks)
 
-    # Collections on future billings (driver-based)
-    lag_weeks = math.ceil((company.dso_days + sc.collections_delay_days) / 7)
+    # New billings: issued weekly, collected after DSO (+ scenario delay)
+    lag = -(-(company.dso_days + sc.collections_delay_days) // 7)  # ceil
     weekly = company.base_weekly_billings * (1 + sc.billings_change_pct)
     for w in range(WEEKS):
-        if w + lag_weeks < WEEKS:
-            receipts[w + lag_weeks] += weekly
+        s["billings"][w] = weekly
+        if w + lag < WEEKS:
+            s["collections_new"][w + lag] += weekly
 
-    # Payroll (biweekly) + incremental hires
     pay = date.fromisoformat(company.first_payroll_date)
     while pay <= end:
-        wk = _week_idx(pay, start)
-        extra = sc.new_hires * sc.hire_monthly_cost * 12 / 26 if wk >= sc.hire_start_week else 0
-        payroll[wk] += company.payroll_per_period + extra
+        s["payroll"][_week_idx(pay, start)] += company.payroll_per_period
         pay += timedelta(days=14)
 
-    # AP bills on due date (past-due paid in week 0)
-    for b in company.bills:
+    for b in company.bills:  # on due date; past-due bills paid in week 1
         wk = _week_idx(date.fromisoformat(b.due_date), start)
         if wk < WEEKS:
-            ap[wk] += b.amount
+            s["vendors"][wk] += b.amount
+    for w in range(8, WEEKS):  # beyond the window where actual bills exist
+        s["vendors"][w] += company.weekly_vendor_run_rate * (1 + sc.opex_change_pct)
 
-    # Vendor run-rate beyond the window where we have actual bills (week 8+)
-    for w in range(8, WEEKS):
-        ap[w] += company.weekly_vendor_run_rate
-
-    # Recurring opex
     for r in company.recurring:
+        line = r.category if r.category in DISB_KEYS else "other_disb"
         for due in _recurring_dates(r.frequency, r.day_of_month, start, end):
-            opex[_week_idx(due, start)] += r.amount * (1 + sc.opex_change_pct)
+            s[line][_week_idx(due, start)] += r.amount * (1 + sc.opex_change_pct)
 
-    # One-time items
     for wk, amt, _label in sc.one_time_items:
-        if 0 <= wk < WEEKS:
-            other[wk] += amt
+        if 1 <= wk <= WEEKS:
+            s["one_time"][wk - 1] += amt
+    return s
 
-    rows, cash = [], company.opening_cash
-    for w in range(WEEKS):
-        inflow = receipts[w] + max(other[w], 0)
-        outflow = payroll[w] + ap[w] + opex[w] + max(-other[w], 0)
-        begin, cash = cash, cash + inflow - outflow
-        rows.append({
-            "week": w, "week_start": (start + timedelta(days=7 * w)).isoformat(),
-            "beginning_cash": round(begin), "receipts": round(inflow), "payroll": round(payroll[w]),
-            "ap": round(ap[w]), "opex": round(opex[w]), "other_out": round(max(-other[w], 0)),
-            "net_cash_flow": round(inflow - outflow), "ending_cash": round(cash),
-        })
-    return {"scenario": asdict(sc), "rows": rows, "summary": summarize(company, rows)}
+
+def pay_flags(company: Company) -> list[int]:
+    """1 if the week contains the 1st of a month (interest and fees paid in arrears)."""
+    return [int(any((a + timedelta(days=k)).day == 1 for k in range(7))) for a, _ in week_dates(company)]
+
+
+def build(company: Company, scenario: Scenario | None = None) -> dict:
+    sc = scenario or Scenario()
+    t = company.terms
+    bbc = bb.compute(company)
+    s = operating_schedule(company, sc)
+    flags = pay_flags(company)
+    rate = t.rate
+
+    cash, loan = company.opening_cash, t.opening_loan
+    ar = bbc.gross_ar
+    int_accr = t.opening_loan * rate * t.days_accrued / 360
+    fee_accr = max(0.0, t.commitment - t.opening_loan) * t.unused_fee * t.days_accrued / 360
+    rows = []
+    for w, (wk_start, wk_end) in enumerate(week_dates(company)):
+        receipts = sum(s[k][w] for k, _ in RECEIPT_LINES)
+        disb = sum(s[k][w] for k in DISB_KEYS)
+        net_operating = receipts - disb
+
+        ar_beg = ar
+        collections = s["collections_ar"][w] + s["collections_new"][w]
+        ar = ar_beg + s["billings"][w] - collections - s["write_offs"][w]
+        eligible = ar * bbc.eligible_pct
+        borrowing_base = eligible * t.advance_rate - t.availability_block
+        max_borrow = max(0.0, min(t.commitment, borrowing_base))
+
+        int_paid = int_accr if flags[w] else 0.0
+        fee_paid = fee_accr if flags[w] else 0.0
+        int_accrual = loan * rate * 7 / 360
+        fee_accrual = max(0.0, t.commitment - loan) * t.unused_fee * 7 / 360
+
+        beg_cash, beg_loan = cash, loan
+        pre_cash = beg_cash + net_operating + s["one_time"][w] - int_paid - fee_paid
+        avail_pre = max(0.0, max_borrow - beg_loan)
+        overadvance = max(0.0, beg_loan - max_borrow)
+        draw = min(company.min_cash_policy - pre_cash, avail_pre) if pre_cash < company.min_cash_policy else 0.0
+        sweep = max(0.0, pre_cash - (company.min_cash_policy + company.sweep_buffer))
+        repay = min(beg_loan, max(overadvance, sweep), max(0.0, pre_cash))
+        loan = beg_loan + draw - repay
+        cash = pre_cash + draw - repay
+        int_accr = int_accr - int_paid + int_accrual
+        fee_accr = fee_accr - fee_paid + fee_accrual
+
+        availability = max_borrow - loan
+        liquidity = cash + max(0.0, availability)
+        row = {
+            "week": w + 1, "week_start": wk_start.isoformat(), "week_end": wk_end.isoformat(),
+            **{k: s[k][w] for k, _ in RECEIPT_LINES}, "total_receipts": receipts,
+            **{k: s[k][w] for k in DISB_KEYS}, "total_disbursements": disb,
+            "net_operating_cf": net_operating, "one_time": s["one_time"][w],
+            "interest_paid": int_paid, "unused_fee_paid": fee_paid,
+            "net_cf_before_revolver": pre_cash - beg_cash,
+            "beginning_cash": beg_cash, "cash_before_revolver": pre_cash,
+            "draws": draw, "repayments": repay, "ending_cash": cash,
+            "ar_beginning": ar_beg, "billings": s["billings"][w], "collections": collections,
+            "write_offs": s["write_offs"][w], "ar_ending": ar,
+            "eligible_ar": eligible, "borrowing_base": borrowing_base, "max_borrowing": max_borrow,
+            "loan_beginning": beg_loan, "availability_before_draw": avail_pre, "overadvance": overadvance,
+            "loan_ending": loan, "pay_flag": flags[w],
+            "interest_accrual": int_accrual, "unused_fee_accrual": fee_accrual,
+            "interest_accrued_end": int_accr, "unused_fee_accrued_end": fee_accr,
+            "availability": availability, "liquidity": liquidity,
+        }
+        row["covenants"] = covenant_tests(company, row)
+        rows.append(row)
+    return {"scenario": asdict(sc), "rows": rows, "summary": summarize(company, rows), "bbc": bbc}
+
+
+def covenant_tests(company: Company, r: dict) -> dict:
+    t = company.terms
+    return {
+        "min_liquidity": {"actual": r["liquidity"], "required": t.min_liquidity,
+                          "cushion": r["liquidity"] - t.min_liquidity, "pass": r["liquidity"] >= t.min_liquidity},
+        "min_excess_availability": {"actual": r["availability"], "required": t.min_excess_availability,
+                                    "cushion": r["availability"] - t.min_excess_availability,
+                                    "pass": r["availability"] >= t.min_excess_availability},
+        "fccr_springing": {"actual": r["availability"], "trigger": t.fccr_trigger_pct * t.commitment,
+                           "triggered": r["availability"] < t.fccr_trigger_pct * t.commitment},
+        "no_overadvance": {"pass": r["loan_ending"] <= r["max_borrowing"] + 0.005},
+        "cash_positive": {"pass": r["ending_cash"] >= 0},
+    }
+
+
+COVENANT_LABELS = {
+    "min_liquidity": "Minimum Liquidity",
+    "min_excess_availability": "Minimum Excess Availability",
+    "no_overadvance": "No over-advance",
+    "cash_positive": "Cash stays positive",
+}
 
 
 def summarize(company: Company, rows: list[dict]) -> dict:
-    ending = rows[-1]["ending_cash"]
-    min_row = min(rows, key=lambda r: r["ending_cash"])
-    policy = company.min_cash_policy
-    n = len(rows)
-    total_net = sum(r["net_cash_flow"] for r in rows)
-    weekly_net_burn = -total_net / n
-    # Gross burn = all cash leaving the business, regardless of receipts.
-    weekly_gross_burn = sum(r["payroll"] + r["ap"] + r["opex"] + r["other_out"] for r in rows) / n
-    breach = next((r for r in rows if r["ending_cash"] < policy), None)
-    zero = next((r for r in rows if r["ending_cash"] < 0), None)
-
-    def runway_weeks(threshold: float):
-        """Weeks from as-of until cash falls below `threshold` at the current net burn."""
-        hit = next((r for r in rows if r["ending_cash"] < threshold), None)
-        if hit:
-            return hit["week"]
-        if weekly_net_burn > 0:
-            return round(n + (ending - threshold) / weekly_net_burn, 1)
-        return None  # cash generative over the window
-
-    to_zero = runway_weeks(0)
-    to_policy = runway_weeks(policy)
-    net_burn_monthly = weekly_net_burn * WEEKS_PER_MONTH
-    arr = company.monthly_net_new_arr
-    burn_multiple = round(net_burn_monthly / arr, 2) if arr and weekly_net_burn > 0 else None
+    low = min(rows, key=lambda r: r["ending_cash"])
+    low_liq = min(rows, key=lambda r: r["liquidity"])
+    low_av = min(rows, key=lambda r: r["availability"])
+    breaches = [(r["week"], COVENANT_LABELS[k]) for r in rows for k in COVENANT_LABELS
+                if not r["covenants"][k]["pass"]]
+    trig = [r["week"] for r in rows if r["covenants"]["fccr_springing"]["triggered"]]
     return {
-        "opening_cash": round(company.opening_cash),
-        "ending_cash_week13": ending,
-        "lowest_cash": min_row["ending_cash"],
-        "lowest_cash_week": min_row["week"],
-        "avg_weekly_net_burn": round(weekly_net_burn),
-        "avg_weekly_gross_burn": round(weekly_gross_burn),
-        "net_burn_monthly": round(net_burn_monthly),
-        "gross_burn_monthly": round(weekly_gross_burn * WEEKS_PER_MONTH),
-        "runway_months_at_current_burn": round(ending / net_burn_monthly, 1) if weekly_net_burn > 0 else None,
-        "runway_weeks_to_zero": to_zero,
-        "runway_months_to_zero": round(to_zero * 12 / 52, 1) if to_zero is not None else None,
-        "runway_weeks_to_policy": to_policy,
-        "runway_months_to_policy": round(to_policy * 12 / 52, 1) if to_policy is not None else None,
-        "monthly_net_new_arr": round(arr),
-        "burn_multiple": burn_multiple,
-        "min_cash_policy": round(policy),
-        "first_week_below_policy": breach["week"] if breach else None,
-        "first_week_cash_negative": zero["week"] if zero else None,
+        "opening_cash": company.opening_cash,
+        "ending_cash": rows[-1]["ending_cash"],
+        "lowest_cash": low["ending_cash"], "lowest_cash_week": low["week"],
+        "total_receipts": sum(r["total_receipts"] for r in rows),
+        "total_disbursements": sum(r["total_disbursements"] for r in rows),
+        "opening_loan": company.terms.opening_loan,
+        "ending_loan": rows[-1]["loan_ending"],
+        "peak_loan": max(r["loan_ending"] for r in rows),
+        "total_draws": sum(r["draws"] for r in rows),
+        "total_repayments": sum(r["repayments"] for r in rows),
+        "interest_and_fees": sum(r["interest_paid"] + r["unused_fee_paid"] for r in rows),
+        "lowest_availability": low_av["availability"], "lowest_availability_week": low_av["week"],
+        "lowest_liquidity": low_liq["liquidity"], "lowest_liquidity_week": low_liq["week"],
+        "ending_liquidity": rows[-1]["liquidity"],
+        "breaches": breaches,
+        "first_breach_week": breaches[0][0] if breaches else None,
+        "fccr_trigger_weeks": trig,
+        "all_covenants_pass": not breaches,
     }
 
 
-def _percentile(sorted_vals: list[float], q: float) -> float:
-    """Linear-interpolation percentile of an already-sorted list."""
-    if not sorted_vals:
-        return 0.0
-    idx = q * (len(sorted_vals) - 1)
-    lo, hi = math.floor(idx), math.ceil(idx)
-    if lo == hi:
-        return sorted_vals[lo]
-    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (idx - lo)
-
-
-def simulate(company: Company, scenario: Scenario | None = None,
-             n: int = 2000, seed: int = 12345) -> dict:
-    """Monte Carlo on collection timing + realization and billings size.
-
-    Contractual outflows (payroll, AP, opex) are taken from the deterministic
-    build and held fixed; the spread comes from when/whether cash is collected.
-    Returns per-week P10/P50/P90 ending-cash bands and breach probabilities.
-    Seeded, so the dashboard is reproducible across rebuilds.
-    """
-    sc = scenario or Scenario()
-    start = date.fromisoformat(company.as_of)
-    policy = company.min_cash_policy
-    det = build(company, sc)
-    outflow = [r["payroll"] + r["ap"] + r["opex"] + r["other_out"] for r in det["rows"]]
-    lag_weeks = math.ceil((company.dso_days + sc.collections_delay_days) / 7)
-    base_weekly = company.base_weekly_billings * (1 + sc.billings_change_pct)
-
-    rng = random.Random(seed)
-    paths: list[list[float]] = []
-    for _ in range(n):
-        receipts = [0.0] * WEEKS
-        for inv in company.invoices:
-            due = date.fromisoformat(inv.due_date)
-            days = inv.typical_days_late + sc.collections_delay_days + round(rng.gauss(0, SIM_SIGMA_DAYS))
-            wk = _week_idx(due + timedelta(days=days), start)
-            if wk >= WEEKS:
-                continue
-            p_collect = 1 - min(1.0, inv.collect_risk * sc.bad_debt_multiplier)
-            if rng.random() < p_collect:
-                receipts[wk] += inv.amount
-        for w in range(WEEKS):
-            if w + lag_weeks < WEEKS:
-                receipts[w + lag_weeks] += max(0.0, base_weekly * (1 + rng.gauss(0, SIM_SIGMA_BILLINGS)))
-        cash = company.opening_cash
-        path = []
-        for w in range(WEEKS):
-            cash += receipts[w] - outflow[w]
-            path.append(cash)
-        paths.append(path)
-
-    p10, p50, p90 = [], [], []
-    for w in range(WEEKS):
-        col = sorted(p[w] for p in paths)
-        p10.append(round(_percentile(col, 0.10)))
-        p50.append(round(_percentile(col, 0.50)))
-        p90.append(round(_percentile(col, 0.90)))
-    lows = sorted(min(p) for p in paths)
-    return {
-        "n": n,
-        "p10": p10, "p50": p50, "p90": p90,
-        "prob_breach_policy": round(sum(1 for p in paths if min(p) < policy) / n, 3),
-        "prob_cash_negative": round(sum(1 for p in paths if min(p) < 0) / n, 3),
-        "worst_case_low_p10": round(_percentile(lows, 0.10)),  # pessimistic lowest cash
-        "median_low": round(_percentile(lows, 0.50)),
-        "best_case_low_p90": round(_percentile(lows, 0.90)),
-    }
-
-
-def compare(company: Company, names: list[str]) -> list[dict]:
+def compare(company: Company, scenarios: dict[str, Scenario] | None = None) -> list[dict]:
     out = []
-    for n in names:
-        res = build(company, PRESETS[n])
-        s = res["summary"]
-        out.append({"scenario": n, **{k: s[k] for k in (
-            "ending_cash_week13", "lowest_cash", "lowest_cash_week", "avg_weekly_net_burn",
-            "runway_months_at_current_burn", "first_week_below_policy")}})
+    for name, sc in (scenarios or presets(company)).items():
+        s = build(company, sc)["summary"]
+        out.append({"scenario": name, "label": sc.label, **{k: s[k] for k in (
+            "ending_cash", "lowest_cash", "lowest_cash_week", "peak_loan", "lowest_availability",
+            "lowest_availability_week", "lowest_liquidity", "lowest_liquidity_week", "first_breach_week",
+            "fccr_trigger_weeks", "all_covenants_pass")},
+            "breach_detail": "; ".join(f"wk {w}: {c}" for w, c in s["breaches"][:3])})
     return out
 
 
-def ar_risk(company: Company) -> list[dict]:
-    """Open AR ranked by expected-loss exposure."""
-    start = date.fromisoformat(company.as_of)
-    rows = []
-    for i in company.invoices:
-        due = date.fromisoformat(i.due_date)
-        rows.append({
-            "customer": i.customer, "amount": i.amount,
-            "days_past_due": max(0, (start - due).days),
-            "typical_days_late": i.typical_days_late,
-            "collect_risk": i.collect_risk,
-            "expected_loss": round(i.amount * i.collect_risk),
-        })
-    return sorted(rows, key=lambda r: r["expected_loss"], reverse=True)
+def with_overrides(sc: Scenario, **kw) -> Scenario:
+    return replace(sc, **kw)

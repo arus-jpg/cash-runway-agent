@@ -1,102 +1,132 @@
-"""CLI: python -m runway.cli <generate|forecast|compare|ar|ask|chat>"""
+"""CLI: python -m runway.cli [--data-dir DIR] <forecast|bbc|covenants|variance|compare|export>"""
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
+from datetime import date
 from pathlib import Path
 
-from . import data, forecast as fc
+from . import borrowing_base as bb, data, forecast as fc, variance
 
-SAMPLE_DIR = Path(__file__).resolve().parent.parent / "data" / "sample"
-DATA_DIR = SAMPLE_DIR  # overridden by --data-dir
+ROOT = Path(__file__).resolve().parent.parent
+SAMPLE_DIR = ROOT / "data" / "sample"
 
 
 def m(x) -> str:
     if x is None:
         return "n/a"
-    return f"-${abs(x) / 1e6:,.2f}M" if x < 0 else f"${x / 1e6:,.2f}M"
+    if abs(x) < 500:
+        return "-"
+    return f"({abs(x) / 1e3:,.0f})" if x < 0 else f"{x / 1e3:,.0f}"
 
 
-def load() -> data.Company:
-    if not (DATA_DIR / "assumptions.csv").exists():
-        data.export_csvs(data.generate(), SAMPLE_DIR)
-    return data.load_csvs(DATA_DIR)
-
-
-def print_forecast(res: dict, company: data.Company) -> None:
-    print(f"\nScenario: {res['scenario']['name']}   (min cash policy {m(company.min_cash_policy)})")
-    print(f"{'Wk':>2} {'Start':<10} {'Begin':>9} {'Receipts':>9} {'Payroll':>9} {'AP':>9} {'Opex':>9} {'End':>9}")
-    for r in res["rows"]:
-        flag = " <-- below policy" if r["ending_cash"] < company.min_cash_policy else ""
-        print(f"{r['week']:>2} {r['week_start']:<10} {m(r['beginning_cash']):>9} {m(r['receipts']):>9} "
-              f"{m(r['payroll']):>9} {m(r['ap']):>9} {m(r['opex']):>9} {m(r['ending_cash']):>9}{flag}")
+def print_forecast(res: dict) -> None:
+    rows = res["rows"]
+    print(f"\nScenario: {res['scenario']['label']}   ($000s)")
+    cols = [("Receipts", "total_receipts", 1), ("Disburse", "total_disbursements", -1),
+            ("Int/fees", None, -1), ("Draw", "draws", 1), ("Repay", "repayments", -1),
+            ("End cash", "ending_cash", 1), ("Revolver", "loan_ending", 1), ("Avail", "availability", 1),
+            ("Liquidity", "liquidity", 1)]
+    print(f"{'Wk':>2} {'Begins':<10} " + " ".join(f"{c[0]:>9}" for c in cols) + "  Covenants")
+    for r in rows:
+        vals = []
+        for _lab, key, sign in cols:
+            v = (r["interest_paid"] + r["unused_fee_paid"]) if key is None else r[key]
+            vals.append(m(sign * v))
+        fails = [fc.COVENANT_LABELS[k] for k in fc.COVENANT_LABELS if not r["covenants"][k]["pass"]]
+        flag = "FAIL: " + ", ".join(fails) if fails else "pass"
+        if r["covenants"]["fccr_springing"]["triggered"]:
+            flag += " | FCCR springs"
+        print(f"{r['week']:>2} {r['week_start']:<10} " + " ".join(f"{v:>9}" for v in vals) + f"  {flag}")
     s = res["summary"]
-    print(f"\nLowest cash: {m(s['lowest_cash'])} (wk {s['lowest_cash_week']}) | "
-          f"Week-13 cash: {m(s['ending_cash_week13'])} | Avg weekly net burn: {m(s['avg_weekly_net_burn'])} | "
-          f"Runway: {s['runway_months_at_current_burn'] or 'cash generative'} mo")
+    print(f"\nEnding cash {m(s['ending_cash'])} | lowest liquidity {m(s['lowest_liquidity'])} (wk "
+          f"{s['lowest_liquidity_week']}) | peak revolver {m(s['peak_loan'])} | covenants: "
+          f"{'PASS all 13 weeks' if s['all_covenants_pass'] else 'FAIL from week ' + str(s['first_breach_week'])}")
+
+
+def print_bbc(company: data.Company) -> None:
+    b = bb.compute(company)
+    print(f"\nBorrowing Base Certificate - {company.name} - as of {company.as_of}")
+    print(f"{'Gross A/R':<44}{b.gross_ar:>14,.0f}")
+    for cat, amt in b.ineligibles.items():
+        print(f"  less {cat:<39}{-amt:>14,.0f}")
+    print(f"{'Eligible A/R':<44}{b.eligible_ar:>14,.0f}   ({b.eligible_pct:.1%} of gross)")
+    print(f"{'x advance rate ' + format(company.terms.advance_rate, '.0%'):<44}{b.gross_availability:>14,.0f}")
+    print(f"{'less availability block':<44}{-company.terms.availability_block:>14,.0f}")
+    print(f"{'Borrowing base':<44}{b.borrowing_base:>14,.0f}")
+    print(f"{'Maximum borrowing (lesser of commitment/BB)':<44}{b.max_borrowing:>14,.0f}")
+    print(f"{'less revolver outstanding':<44}{-b.loan:>14,.0f}")
+    print(f"{'Availability':<44}{b.availability:>14,.0f}")
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="runway")
-    p.add_argument("--data-dir", help="folder of QuickBooks-style CSVs (default: data/sample)")
+    p = argparse.ArgumentParser(prog="runway", description="Lender 13-week cash flow & borrowing base")
+    p.add_argument("--data-dir", default=str(SAMPLE_DIR), help="folder of input CSVs (default: data/sample)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("generate", help="regenerate the dummy QuickBooks CSVs in data/sample")
-    f = sub.add_parser("forecast", help="show 13-week forecast")
-    f.add_argument("--scenario", default="base", choices=list(fc.PRESETS))
-    f.add_argument("--csv", help="also write rows to this CSV path")
-    c = sub.add_parser("compare", help="compare preset scenarios")
-    c.add_argument("names", nargs="*", default=list(fc.PRESETS))
-    sub.add_parser("ar", help="top AR collection risks")
-    a = sub.add_parser("ask", help="ask the Claude agent one question")
-    a.add_argument("question")
-    sub.add_parser("chat", help="interactive agent chat")
+    for name, hlp in [("forecast", "13-week cash flow with revolver and covenant status"),
+                      ("covenants", "weekly covenant tests")]:
+        sp = sub.add_parser(name, help=hlp)
+        sp.add_argument("--scenario", default="base")
+    sub.add_parser("bbc", help="borrowing base certificate as of the as-of date")
+    sub.add_parser("variance", help="budget-to-actual variance and permitted-variance tests")
+    sub.add_parser("compare", help="all lender sensitivities side by side")
+    e = sub.add_parser("export", help="write the Excel lender package")
+    e.add_argument("--scenario", default="base")
+    e.add_argument("--out", help="output .xlsx path (default: out/<as-of> Lender Package.xlsx)")
+    e.add_argument("--no-verify", action="store_true", help="skip the workbook-to-engine tie-out")
     args = p.parse_args(argv)
 
-    global DATA_DIR
-    if args.data_dir:
-        DATA_DIR = Path(args.data_dir)
-    if args.cmd == "generate":
-        data.export_csvs(data.generate(), SAMPLE_DIR)
-        print(f"Wrote dummy QuickBooks CSVs to {SAMPLE_DIR}")
-        return 0
-    company = load()
+    company = data.load_csvs(Path(args.data_dir))
+    presets = fc.presets(company)
+    scen = getattr(args, "scenario", "base")
+    if scen not in presets:
+        p.error(f"unknown scenario {scen!r}; choose from {', '.join(presets)}")
+
     if args.cmd == "forecast":
-        res = fc.build(company, fc.PRESETS[args.scenario])
-        print_forecast(res, company)
-        if args.csv:
-            with open(args.csv, "w", newline="") as fh:
-                w = csv.DictWriter(fh, fieldnames=res["rows"][0].keys())
-                w.writeheader()
-                w.writerows(res["rows"])
-            print(f"Wrote {args.csv}")
+        print_forecast(fc.build(company, presets[scen]))
+    elif args.cmd == "covenants":
+        res = fc.build(company, presets[scen])
+        for r in res["rows"]:
+            cv = r["covenants"]
+            print(f"wk {r['week']:>2}  liquidity {m(cv['min_liquidity']['actual']):>7} vs {m(cv['min_liquidity']['required'])}"
+                  f" {'PASS' if cv['min_liquidity']['pass'] else 'FAIL'} | availability "
+                  f"{m(cv['min_excess_availability']['actual']):>6} vs {m(cv['min_excess_availability']['required'])} "
+                  f"{'PASS' if cv['min_excess_availability']['pass'] else 'FAIL'}"
+                  f"{' | FCCR springs' if cv['fccr_springing']['triggered'] else ''}")
+    elif args.cmd == "bbc":
+        print_bbc(company)
+    elif args.cmd == "variance":
+        v = variance.report(company)
+        if not v["available"]:
+            print("no variance_history.csv")
+            return 0
+        print(f"\nPrior week ending {v['prior_week']} | rolling window {v['window'][0]} - {v['window'][-1]}")
+        print(f"{'Line':<22}{'Prior fcst':>12}{'Prior act':>12}{'Fav/(unfav)':>12}{'Cum fcst':>12}{'Cum act':>12}{'Fav/(unfav)':>12}")
+        for x in v["lines"]:
+            z = lambda n: f"{n + 0.0:>12,.0f}"  # noqa: E731  (+0.0 turns -0 into 0)
+            print(f"{x['label']:<22}" + "".join(z(x[k]) for k in ("prior_forecast", "prior_actual", "prior_fav",
+                                                                  "cum_forecast", "cum_actual", "cum_fav")))
+        for t in v["tests"]:
+            print(f"{t['test']}: {t['ratio']:.1%} -> {'PASS' if t['pass'] else 'FAIL'}")
     elif args.cmd == "compare":
-        print(f"\n{'Scenario':<18} {'Wk13 cash':>10} {'Low cash':>10} {'Low wk':>6} {'Burn/wk':>9} {'Runway mo':>9} {'Below policy':>12}")
-        for r in fc.compare(company, args.names):
-            print(f"{r['scenario']:<18} {m(r['ending_cash_week13']):>10} {m(r['lowest_cash']):>10} "
-                  f"{r['lowest_cash_week']:>6} {m(r['avg_weekly_net_burn']):>9} "
-                  f"{str(r['runway_months_at_current_burn'] or 'n/a'):>9} "
-                  f"{('wk ' + str(r['first_week_below_policy'])) if r['first_week_below_policy'] is not None else 'never':>12}")
-    elif args.cmd == "ar":
-        for r in fc.ar_risk(company)[:8]:
-            print(f"{r['customer']:<22} {m(r['amount']):>9}  past due {r['days_past_due']:>3}d  "
-                  f"risk {r['collect_risk']:.0%}  expected loss ${r['expected_loss']:,}")
-    elif args.cmd in ("ask", "chat"):
-        from .agent import ask
-        if args.cmd == "ask":
-            ans, _ = ask(company, args.question, verbose=True)
-            print("\n" + ans)
-        else:
-            hist = None
-            print("CFO runway agent. Ctrl+C to exit.")
-            while True:
-                try:
-                    q = input("\nCFO> ").strip()
-                except (KeyboardInterrupt, EOFError):
-                    return 0
-                if q:
-                    ans, hist = ask(company, q, hist, verbose=True)
-                    print("\n" + ans)
+        print(f"\n{'Scenario':<48}{'End cash':>10}{'Low liq':>10}{'Wk':>4}{'Peak RLOC':>10}{'Covenants':>11}")
+        for r in fc.compare(company, presets):
+            print(f"{r['label']:<48}{m(r['ending_cash']):>10}{m(r['lowest_liquidity']):>10}"
+                  f"{r['lowest_liquidity_week']:>4}{m(r['peak_loan']):>10}"
+                  f"{('PASS' if r['all_covenants_pass'] else 'FAIL wk ' + str(r['first_breach_week'])):>11}")
+    elif args.cmd == "export":
+        from . import excel_export as xe
+        out = Path(args.out) if args.out else ROOT / "out" / f"{date.fromisoformat(company.as_of):%Y-%m-%d} Lender Package.xlsx"
+        _, _, b = xe.export(company, presets[scen], path=out, scenarios=presets)
+        print(f"Wrote {out}")
+        if not args.no_verify:
+            from . import tieout
+            bad = tieout.tie(out, b)
+            if bad:
+                print(f"TIE-OUT FAILED ({len(bad)} differences):")
+                print("\n".join("  " + x for x in bad[:20]))
+                return 1
+            print("Tie-out: workbook formulas agree with the engine in every week (0 differences).")
     return 0
 
 

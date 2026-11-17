@@ -1,8 +1,8 @@
-Key,Value
-company_name,Acme Robotics (synthetic)
-as_of,11/16/2026
-min_cash_policy,3000000
-base_weekly_billings,300000
-dso_days,48
-weekly_vendor_run_rate,120000
-monthly_net_new_arr,800000
+Key,Value,Description
+company_name,Acme Robotics (synthetic),Borrower name shown on the package
+as_of,11/16/2026,Forecast start (a Monday); week 1 begins here
+min_cash_policy,3000000,Minimum operating cash; the revolver is drawn to hold this level
+sweep_buffer,500000,Cash above min_cash_policy + this buffer is swept to repay the revolver
+base_weekly_billings,300000,New invoices issued per week
+dso_days,48,Days from new invoice to cash for forecast billings
+weekly_vendor_run_rate,120000,Un-billed vendor spend per week beyond the known-bill window (weeks 9-13)

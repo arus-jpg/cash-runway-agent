@@ -1,2 +1,5 @@
-anthropic>=0.40.0
+streamlit>=1.50
+pandas>=2.0
+openpyxl>=3.1
+formulas>=1.2      # independent recalculation of the exported workbook (tie-out)
 pytest>=8.0

@@ -1,6 +1,6 @@
 Name,Amount,Frequency,Day of Month,Category
 Office rent,62000.00,monthly,1,facilities
-Cloud & SaaS,118000.00,monthly,15,tech
-Benefits & 401k,96000.00,monthly,5,people
-Insurance,54000.00,quarterly,20,g&a
-Sales tax / other taxes,38000.00,quarterly,28,tax
+Cloud & SaaS,118000.00,monthly,15,technology
+Benefits & 401k,96000.00,monthly,5,benefits
+Insurance,54000.00,quarterly,20,insurance
+Sales tax / other taxes,38000.00,quarterly,28,taxes

@@ -1,20 +1,41 @@
-"""Synthetic company data for the demo. No real numbers - safe to commit."""
+"""Inputs for the lender 13-week package, read from QuickBooks-style CSVs.
+
+  ar_aging_detail.csv    <- QB "A/R Aging Detail"       (open invoices)
+  ap_aging_detail.csv    <- QB "A/P Aging Detail"       (unpaid bills)
+  bank_balances.csv      <- QB "Balance Sheet", bank accounts
+  payroll_register.csv   <- payroll provider history (biweekly)
+  customer_terms.csv     <- finance team: customer type (drives eligibility), pay behavior
+  recurring_expenses.csv <- finance team: rent, benefits, SaaS, insurance, taxes
+  assumptions.csv        <- borrower operating assumptions
+  facility_terms.csv     <- the credit agreement terms (borrowing base, pricing, covenants)
+  variance_history.csv   <- prior weeks' forecast vs actual, by cash-flow line
+
+Dates are MM/DD/YYYY, as QuickBooks exports them. Everything in data/sample is synthetic.
+"""
 from __future__ import annotations
 
-import json
-import random
-from dataclasses import dataclass, field, asdict
-from datetime import date, timedelta
+import csv
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-AS_OF = date(2026, 11, 16)  # a Monday; week 0 starts here
+QB_FMT = "%m/%d/%Y"
+
+CUSTOMER_TYPES = ("Commercial", "US Gov - Assigned", "US Gov - Unassigned", "Foreign", "Affiliate")
+
+
+class InputError(ValueError):
+    """Raised when an input file is missing, malformed, or fails a validation check."""
 
 
 @dataclass
 class Invoice:
     customer: str
+    num: str
+    invoice_date: str  # ISO
+    due_date: str      # ISO
     amount: float
-    due_date: str  # ISO
+    customer_type: str
     typical_days_late: int
     collect_risk: float  # probability the invoice is never collected (0-1)
 
@@ -22,8 +43,10 @@ class Invoice:
 @dataclass
 class Bill:
     vendor: str
-    amount: float
+    num: str
+    bill_date: str
     due_date: str
+    amount: float
 
 
 @dataclass
@@ -32,178 +55,194 @@ class Recurring:
     amount: float
     frequency: str  # monthly | quarterly
     day_of_month: int
-    category: str = "opex"
+    category: str   # benefits | facilities | technology | insurance | taxes | other_disb
+
+
+@dataclass
+class BankAccount:
+    name: str
+    balance: float
+
+
+@dataclass
+class VarianceRow:
+    week_ending: str  # ISO
+    line: str
+    forecast: float
+    actual: float
+
+
+@dataclass
+class FacilityTerms:
+    lender_name: str = "Illustrative ABL Lender"
+    facility_status: str = "ILLUSTRATIVE"
+    commitment: float = 2_000_000
+    advance_rate: float = 0.85
+    ineligible_days: int = 90
+    cross_age_pct: float = 0.50
+    concentration_limit: float = 0.25
+    gov_concentration_limit: float = 0.50
+    availability_block: float = 250_000
+    sofr: float = 0.043
+    margin: float = 0.03
+    unused_fee: float = 0.00375
+    opening_loan: float = 750_000
+    days_accrued: int = 15
+    min_liquidity: float = 3_000_000
+    min_excess_availability: float = 150_000
+    fccr_trigger_pct: float = 0.125
+    variance_receipts_min: float = 0.85
+    variance_disb_max: float = 1.15
+
+    @property
+    def rate(self) -> float:
+        return self.sofr + self.margin
+
+    @property
+    def is_draft(self) -> bool:
+        return self.facility_status.strip().upper() != "EXECUTED"
+
+
+TERM_DESCRIPTIONS: dict[str, str] = {}  # filled from facility_terms.csv on load
 
 
 @dataclass
 class Company:
     name: str
     as_of: str
-    opening_cash: float
-    min_cash_policy: float  # board-mandated minimum cash
-    payroll_per_period: float  # biweekly, fully loaded
+    bank_accounts: list[BankAccount]
+    min_cash_policy: float
+    sweep_buffer: float
+    payroll_per_period: float
     first_payroll_date: str
-    base_weekly_billings: float  # new invoices issued per week
-    dso_days: int  # days from new invoice to cash
-    weekly_vendor_run_rate: float = 0.0  # un-billed vendor spend per week beyond the known-bill window
-    monthly_net_new_arr: float = 0.0  # net new ARR booked per month (for burn multiple); 0 = unknown
+    base_weekly_billings: float
+    dso_days: int
+    weekly_vendor_run_rate: float
+    terms: FacilityTerms
     invoices: list[Invoice] = field(default_factory=list)
     bills: list[Bill] = field(default_factory=list)
     recurring: list[Recurring] = field(default_factory=list)
+    variance: list[VarianceRow] = field(default_factory=list)
 
-
-CUSTOMERS = [
-    ("Northwind Defense", 0.01), ("Helix Aerospace", 0.02), ("Brightline Energy", 0.03),
-    ("Vertex Logistics", 0.05), ("Orion Health", 0.02), ("Atlas Manufacturing", 0.04),
-    ("Pioneer Utilities", 0.01), ("Summit Robotics", 0.08), ("Cobalt Mining", 0.12),
-    ("Redwood Retail", 0.15), ("Nimbus Telecom", 0.03), ("Granite Construction", 0.10),
-]
-VENDORS = ["AWS", "Azure", "Salesforce", "Workday", "Deloitte", "Wilson Sonsini", "WeWork",
-           "Gusto", "Datadog", "Snowflake", "Okta", "CrowdStrike", "Marsh McLennan", "Zoom"]
-
-
-def generate(seed: int = 7) -> Company:
-    rng = random.Random(seed)
-    inv = []
-    for i in range(26):
-        cust, risk = rng.choice(CUSTOMERS)
-        inv.append(Invoice(
-            customer=cust,
-            amount=round(rng.uniform(30_000, 300_000), -2),
-            due_date=(AS_OF + timedelta(days=rng.randint(-35, 60))).isoformat(),
-            typical_days_late=max(0, int(rng.gauss(12, 14))),
-            collect_risk=risk,
-        ))
-    bills = [Bill(rng.choice(VENDORS), round(rng.uniform(8_000, 260_000), -2),
-                  (AS_OF + timedelta(days=rng.randint(-5, 55))).isoformat()) for _ in range(22)]
-    recurring = [
-        Recurring("Office rent", 62_000, "monthly", 1, "facilities"),
-        Recurring("Cloud & SaaS", 118_000, "monthly", 15, "tech"),
-        Recurring("Benefits & 401k", 96_000, "monthly", 5, "people"),
-        Recurring("Insurance", 54_000, "quarterly", 20, "g&a"),
-        Recurring("Sales tax / other taxes", 38_000, "quarterly", 28, "tax"),
-    ]
-    return Company(
-        name="Acme Robotics (synthetic)",
-        as_of=AS_OF.isoformat(),
-        opening_cash=7_300_000,
-        min_cash_policy=3_000_000,
-        payroll_per_period=700_000,
-        first_payroll_date=(AS_OF + timedelta(days=4)).isoformat(),
-        base_weekly_billings=300_000,
-        dso_days=48,
-        weekly_vendor_run_rate=120_000,
-        monthly_net_new_arr=800_000,
-        invoices=inv, bills=bills, recurring=recurring,
-    )
-
-
-def save(company: Company, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(company), indent=2))
-
-
-def load(path: Path) -> Company:
-    d = json.loads(path.read_text())
-    d["invoices"] = [Invoice(**x) for x in d["invoices"]]
-    d["bills"] = [Bill(**x) for x in d["bills"]]
-    d["recurring"] = [Recurring(**x) for x in d["recurring"]]
-    return Company(**d)
-
-
-# ---------------------------------------------------------------------------
-# QuickBooks-style CSV import/export
-#   ar_aging_detail.csv   <- QB report "A/R Aging Detail"      (open invoices)
-#   ap_aging_detail.csv   <- QB report "A/P Aging Detail"      (unpaid bills)
-#   bank_balances.csv     <- QB "Balance Sheet" bank accounts
-#   payroll_register.csv  <- payroll provider / QB payroll history
-#   recurring_expenses.csv, customer_terms.csv, assumptions.csv <- finance team inputs
-# Dates are MM/DD/YYYY, as QuickBooks exports them.
-# ---------------------------------------------------------------------------
-import csv
-from datetime import datetime
-
-QB_FMT = "%m/%d/%Y"
-
-
-def _qb(iso: str) -> str:
-    return date.fromisoformat(iso).strftime(QB_FMT)
+    @property
+    def opening_cash(self) -> float:
+        return sum(a.balance for a in self.bank_accounts)
 
 
 def _iso(qb: str) -> str:
-    return datetime.strptime(qb.strip(), QB_FMT).date().isoformat()
+    try:
+        return datetime.strptime(qb.strip(), QB_FMT).date().isoformat()
+    except ValueError as e:
+        raise InputError(f"bad date {qb!r}: expected MM/DD/YYYY") from e
 
 
 def _money(s: str) -> float:
-    return float(s.replace("$", "").replace(",", "").strip() or 0)
+    s = (s or "").replace("$", "").replace(",", "").strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    return float(s or 0)
 
 
-def _write(path: Path, header: list[str], rows: list[list]) -> None:
-    with open(path, "w", newline="") as fh:
+def _rows(d: Path, name: str, required: list[str]) -> list[dict]:
+    path = d / name
+    if not path.exists():
+        raise InputError(f"missing input file {path}")
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    if rows:
+        missing = [c for c in required if c not in rows[0]]
+        if missing:
+            raise InputError(f"{name}: missing column(s) {missing}")
+    return rows
+
+
+def _coerce(cls_field, raw: str):
+    t = cls_field.type if isinstance(cls_field.type, str) else cls_field.type.__name__
+    if t == "float":
+        return float(raw)
+    if t == "int":
+        return int(float(raw))
+    return raw
+
+
+def load_terms(d: Path) -> FacilityTerms:
+    rows = _rows(d, "facility_terms.csv", ["Key", "Value"])
+    by_key = {r["Key"].strip(): r for r in rows}
+    kw = {}
+    for f in fields(FacilityTerms):
+        if f.name in by_key:
+            kw[f.name] = _coerce(f, by_key[f.name]["Value"])
+            TERM_DESCRIPTIONS[f.name] = by_key[f.name].get("Description", "")
+    unknown = set(by_key) - {f.name for f in fields(FacilityTerms)}
+    if unknown:
+        raise InputError(f"facility_terms.csv: unknown key(s) {sorted(unknown)}")
+    return FacilityTerms(**kw)
+
+
+def save_terms(terms: FacilityTerms, d: Path) -> None:
+    with open(d / "facility_terms.csv", "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(header)
-        w.writerows(rows)
-
-
-def export_csvs(c: Company, outdir: Path) -> None:
-    outdir.mkdir(parents=True, exist_ok=True)
-    as_of = date.fromisoformat(c.as_of)
-    _write(outdir / "ar_aging_detail.csv",
-           ["Customer", "Num", "Invoice Date", "Due Date", "Open Balance"],
-           [[i.customer, f"INV-{1000 + n}", _qb((date.fromisoformat(i.due_date) - timedelta(days=30)).isoformat()),
-             _qb(i.due_date), f"{i.amount:.2f}"] for n, i in enumerate(c.invoices)])
-    _write(outdir / "ap_aging_detail.csv",
-           ["Vendor", "Num", "Bill Date", "Due Date", "Open Balance"],
-           [[b.vendor, f"BILL-{5000 + n}", _qb((date.fromisoformat(b.due_date) - timedelta(days=30)).isoformat()),
-             _qb(b.due_date), f"{b.amount:.2f}"] for n, b in enumerate(c.bills)])
-    operating = round(c.opening_cash * 0.8, 2)
-    _write(outdir / "bank_balances.csv", ["Account", "Balance"],
-           [["Operating Checking (...1234)", f"{operating:.2f}"],
-            ["Money Market (...5678)", f"{c.opening_cash - operating:.2f}"]])
-    last = date.fromisoformat(c.first_payroll_date) - timedelta(days=14)
-    _write(outdir / "payroll_register.csv", ["Pay Date", "Total Payroll Cost"],
-           [[_qb((last - timedelta(days=14 * k)).isoformat()), f"{c.payroll_per_period:.2f}"] for k in range(5, -1, -1)])
-    _write(outdir / "recurring_expenses.csv", ["Name", "Amount", "Frequency", "Day of Month", "Category"],
-           [[r.name, f"{r.amount:.2f}", r.frequency, r.day_of_month, r.category] for r in c.recurring])
-    by_cust: dict[str, list[Invoice]] = {}
-    for i in c.invoices:
-        by_cust.setdefault(i.customer, []).append(i)
-    _write(outdir / "customer_terms.csv", ["Customer", "Typical Days Late", "Collect Risk"],
-           [[k, round(sum(i.typical_days_late for i in v) / len(v)), v[0].collect_risk] for k, v in sorted(by_cust.items())])
-    _write(outdir / "assumptions.csv", ["Key", "Value"],
-           [["company_name", c.name], ["as_of", _qb(c.as_of)], ["min_cash_policy", c.min_cash_policy],
-            ["base_weekly_billings", c.base_weekly_billings], ["dso_days", c.dso_days],
-            ["weekly_vendor_run_rate", c.weekly_vendor_run_rate],
-            ["monthly_net_new_arr", c.monthly_net_new_arr]])
+        w.writerow(["Key", "Value", "Description"])
+        for f in fields(FacilityTerms):
+            w.writerow([f.name, getattr(terms, f.name), TERM_DESCRIPTIONS.get(f.name, "")])
 
 
 def load_csvs(d: Path) -> Company:
-    def rows(name):
-        with open(d / name, newline="") as fh:
-            return list(csv.DictReader(fh))
-
-    a = {r["Key"]: r["Value"] for r in rows("assumptions.csv")}
+    d = Path(d)
+    a = {r["Key"]: r["Value"] for r in _rows(d, "assumptions.csv", ["Key", "Value"])}
+    for k in ("as_of", "min_cash_policy", "base_weekly_billings", "dso_days"):
+        if k not in a:
+            raise InputError(f"assumptions.csv: missing key {k}")
     as_of = _iso(a["as_of"])
-    terms = {r["Customer"]: (int(float(r["Typical Days Late"])), float(r["Collect Risk"]))
-             for r in rows("customer_terms.csv")}
-    default_terms = (10, 0.05)  # unknown customers: 10 days late, 5% risk
-    invoices = [Invoice(r["Customer"], _money(r["Open Balance"]), _iso(r["Due Date"]), *terms.get(r["Customer"], default_terms))
-                for r in rows("ar_aging_detail.csv")]
-    bills = [Bill(r["Vendor"], _money(r["Open Balance"]), _iso(r["Due Date"])) for r in rows("ap_aging_detail.csv")]
-    cash = sum(_money(r["Balance"]) for r in rows("bank_balances.csv"))
-    pay = sorted((date.fromisoformat(_iso(r["Pay Date"])), _money(r["Total Payroll Cost"])) for r in rows("payroll_register.csv"))
+
+    terms_rows = _rows(d, "customer_terms.csv", ["Customer", "Customer Type", "Typical Days Late", "Collect Risk"])
+    cust = {}
+    for r in terms_rows:
+        if r["Customer Type"] not in CUSTOMER_TYPES:
+            raise InputError(f"customer_terms.csv: {r['Customer']} has unknown type {r['Customer Type']!r}; "
+                             f"use one of {CUSTOMER_TYPES}")
+        cust[r["Customer"]] = (r["Customer Type"], int(float(r["Typical Days Late"])), float(r["Collect Risk"]))
+
+    invoices, seen = [], set()
+    for r in _rows(d, "ar_aging_detail.csv", ["Customer", "Num", "Invoice Date", "Due Date", "Open Balance"]):
+        if r["Num"] in seen:
+            raise InputError(f"ar_aging_detail.csv: duplicate invoice number {r['Num']}")
+        seen.add(r["Num"])
+        if r["Customer"] not in cust:
+            raise InputError(f"ar_aging_detail.csv: customer {r['Customer']!r} is not in customer_terms.csv "
+                             "(its type decides eligibility, so it cannot be defaulted)")
+        ctype, late, risk = cust[r["Customer"]]
+        invoices.append(Invoice(r["Customer"], r["Num"], _iso(r["Invoice Date"]), _iso(r["Due Date"]),
+                                _money(r["Open Balance"]), ctype, late, risk))
+
+    bills = [Bill(r["Vendor"], r["Num"], _iso(r["Bill Date"]), _iso(r["Due Date"]), _money(r["Open Balance"]))
+             for r in _rows(d, "ap_aging_detail.csv", ["Vendor", "Num", "Bill Date", "Due Date", "Open Balance"])]
+    banks = [BankAccount(r["Account"], _money(r["Balance"]))
+             for r in _rows(d, "bank_balances.csv", ["Account", "Balance"])]
+
+    pay = sorted((date.fromisoformat(_iso(r["Pay Date"])), _money(r["Total Payroll Cost"]))
+                 for r in _rows(d, "payroll_register.csv", ["Pay Date", "Total Payroll Cost"]))
+    if not pay:
+        raise InputError("payroll_register.csv is empty")
     recent = pay[-4:]
     next_pay = pay[-1][0] + timedelta(days=14)
     while next_pay < date.fromisoformat(as_of):
         next_pay += timedelta(days=14)
+
     recurring = [Recurring(r["Name"], _money(r["Amount"]), r["Frequency"], int(r["Day of Month"]), r["Category"])
-                 for r in rows("recurring_expenses.csv")]
+                 for r in _rows(d, "recurring_expenses.csv", ["Name", "Amount", "Frequency", "Day of Month", "Category"])]
+
+    variance = []
+    vpath = d / "variance_history.csv"
+    if vpath.exists():
+        variance = [VarianceRow(_iso(r["Week Ending"]), r["Line"], _money(r["Forecast"]), _money(r["Actual"]))
+                    for r in _rows(d, "variance_history.csv", ["Week Ending", "Line", "Forecast", "Actual"])]
+
     return Company(
-        name=a.get("company_name", "Company"), as_of=as_of, opening_cash=cash,
-        min_cash_policy=float(a["min_cash_policy"]),
+        name=a.get("company_name", "Company"), as_of=as_of, bank_accounts=banks,
+        min_cash_policy=float(a["min_cash_policy"]), sweep_buffer=float(a.get("sweep_buffer", 0)),
         payroll_per_period=sum(x[1] for x in recent) / len(recent),
         first_payroll_date=next_pay.isoformat(),
         base_weekly_billings=float(a["base_weekly_billings"]), dso_days=int(float(a["dso_days"])),
         weekly_vendor_run_rate=float(a.get("weekly_vendor_run_rate", 0)),
-        monthly_net_new_arr=float(a.get("monthly_net_new_arr", 0)),
-        invoices=invoices, bills=bills, recurring=recurring)
+        terms=load_terms(d), invoices=invoices, bills=bills, recurring=recurring, variance=variance)
