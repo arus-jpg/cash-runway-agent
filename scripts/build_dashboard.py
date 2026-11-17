@@ -33,9 +33,14 @@ def build_payload(data_dir: pathlib.Path) -> dict:
         "compare": fc.compare(company, list(fc.PRESETS)),
         "ar_risk": fc.ar_risk(company)[:8],
     }
+    payload["monthly_net_new_arr"] = round(company.monthly_net_new_arr)
     for name in fc.PRESETS:
         res = fc.build(company, fc.PRESETS[name])
-        payload["scenarios"][name] = {"rows": res["rows"], "summary": res["summary"]}
+        payload["scenarios"][name] = {
+            "rows": res["rows"],
+            "summary": res["summary"],
+            "band": fc.simulate(company, fc.PRESETS[name]),
+        }
     return payload
 
 

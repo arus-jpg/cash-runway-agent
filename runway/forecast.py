@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
 
 from .data import Company
 
 WEEKS = 13
+WEEKS_PER_MONTH = 52 / 12
+
+# Monte Carlo drivers: the uncertainty lives in collections, not in contractual
+# outflows (payroll, bills, opex are known). We perturb collection *timing* and
+# whether each invoice is realized, plus the size of future billings.
+SIM_SIGMA_DAYS = 10.0       # std dev of collection timing, in days
+SIM_SIGMA_BILLINGS = 0.12   # std dev of weekly billings, as a fraction
 
 
 @dataclass
@@ -120,24 +128,117 @@ def build(company: Company, scenario: Scenario | None = None) -> dict:
 def summarize(company: Company, rows: list[dict]) -> dict:
     ending = rows[-1]["ending_cash"]
     min_row = min(rows, key=lambda r: r["ending_cash"])
+    policy = company.min_cash_policy
+    n = len(rows)
     total_net = sum(r["net_cash_flow"] for r in rows)
-    weekly_burn = -total_net / len(rows)
-    breach = next((r for r in rows if r["ending_cash"] < company.min_cash_policy), None)
+    weekly_net_burn = -total_net / n
+    # Gross burn = all cash leaving the business, regardless of receipts.
+    weekly_gross_burn = sum(r["payroll"] + r["ap"] + r["opex"] + r["other_out"] for r in rows) / n
+    breach = next((r for r in rows if r["ending_cash"] < policy), None)
     zero = next((r for r in rows if r["ending_cash"] < 0), None)
-    if weekly_burn > 0:
-        runway_months = round(ending / (weekly_burn * 52 / 12), 1)
-    else:
-        runway_months = None  # cash generative over the window
+
+    def runway_weeks(threshold: float):
+        """Weeks from as-of until cash falls below `threshold` at the current net burn."""
+        hit = next((r for r in rows if r["ending_cash"] < threshold), None)
+        if hit:
+            return hit["week"]
+        if weekly_net_burn > 0:
+            return round(n + (ending - threshold) / weekly_net_burn, 1)
+        return None  # cash generative over the window
+
+    to_zero = runway_weeks(0)
+    to_policy = runway_weeks(policy)
+    net_burn_monthly = weekly_net_burn * WEEKS_PER_MONTH
+    arr = company.monthly_net_new_arr
+    burn_multiple = round(net_burn_monthly / arr, 2) if arr and weekly_net_burn > 0 else None
     return {
         "opening_cash": round(company.opening_cash),
         "ending_cash_week13": ending,
         "lowest_cash": min_row["ending_cash"],
         "lowest_cash_week": min_row["week"],
-        "avg_weekly_net_burn": round(weekly_burn),
-        "runway_months_at_current_burn": runway_months,
-        "min_cash_policy": round(company.min_cash_policy),
+        "avg_weekly_net_burn": round(weekly_net_burn),
+        "avg_weekly_gross_burn": round(weekly_gross_burn),
+        "net_burn_monthly": round(net_burn_monthly),
+        "gross_burn_monthly": round(weekly_gross_burn * WEEKS_PER_MONTH),
+        "runway_months_at_current_burn": round(ending / net_burn_monthly, 1) if weekly_net_burn > 0 else None,
+        "runway_weeks_to_zero": to_zero,
+        "runway_months_to_zero": round(to_zero * 12 / 52, 1) if to_zero is not None else None,
+        "runway_weeks_to_policy": to_policy,
+        "runway_months_to_policy": round(to_policy * 12 / 52, 1) if to_policy is not None else None,
+        "monthly_net_new_arr": round(arr),
+        "burn_multiple": burn_multiple,
+        "min_cash_policy": round(policy),
         "first_week_below_policy": breach["week"] if breach else None,
         "first_week_cash_negative": zero["week"] if zero else None,
+    }
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float:
+    """Linear-interpolation percentile of an already-sorted list."""
+    if not sorted_vals:
+        return 0.0
+    idx = q * (len(sorted_vals) - 1)
+    lo, hi = math.floor(idx), math.ceil(idx)
+    if lo == hi:
+        return sorted_vals[lo]
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (idx - lo)
+
+
+def simulate(company: Company, scenario: Scenario | None = None,
+             n: int = 2000, seed: int = 12345) -> dict:
+    """Monte Carlo on collection timing + realization and billings size.
+
+    Contractual outflows (payroll, AP, opex) are taken from the deterministic
+    build and held fixed; the spread comes from when/whether cash is collected.
+    Returns per-week P10/P50/P90 ending-cash bands and breach probabilities.
+    Seeded, so the dashboard is reproducible across rebuilds.
+    """
+    sc = scenario or Scenario()
+    start = date.fromisoformat(company.as_of)
+    policy = company.min_cash_policy
+    det = build(company, sc)
+    outflow = [r["payroll"] + r["ap"] + r["opex"] + r["other_out"] for r in det["rows"]]
+    lag_weeks = math.ceil((company.dso_days + sc.collections_delay_days) / 7)
+    base_weekly = company.base_weekly_billings * (1 + sc.billings_change_pct)
+
+    rng = random.Random(seed)
+    paths: list[list[float]] = []
+    for _ in range(n):
+        receipts = [0.0] * WEEKS
+        for inv in company.invoices:
+            due = date.fromisoformat(inv.due_date)
+            days = inv.typical_days_late + sc.collections_delay_days + round(rng.gauss(0, SIM_SIGMA_DAYS))
+            wk = _week_idx(due + timedelta(days=days), start)
+            if wk >= WEEKS:
+                continue
+            p_collect = 1 - min(1.0, inv.collect_risk * sc.bad_debt_multiplier)
+            if rng.random() < p_collect:
+                receipts[wk] += inv.amount
+        for w in range(WEEKS):
+            if w + lag_weeks < WEEKS:
+                receipts[w + lag_weeks] += max(0.0, base_weekly * (1 + rng.gauss(0, SIM_SIGMA_BILLINGS)))
+        cash = company.opening_cash
+        path = []
+        for w in range(WEEKS):
+            cash += receipts[w] - outflow[w]
+            path.append(cash)
+        paths.append(path)
+
+    p10, p50, p90 = [], [], []
+    for w in range(WEEKS):
+        col = sorted(p[w] for p in paths)
+        p10.append(round(_percentile(col, 0.10)))
+        p50.append(round(_percentile(col, 0.50)))
+        p90.append(round(_percentile(col, 0.90)))
+    lows = sorted(min(p) for p in paths)
+    return {
+        "n": n,
+        "p10": p10, "p50": p50, "p90": p90,
+        "prob_breach_policy": round(sum(1 for p in paths if min(p) < policy) / n, 3),
+        "prob_cash_negative": round(sum(1 for p in paths if min(p) < 0) / n, 3),
+        "worst_case_low_p10": round(_percentile(lows, 0.10)),  # pessimistic lowest cash
+        "median_low": round(_percentile(lows, 0.50)),
+        "best_case_low_p90": round(_percentile(lows, 0.90)),
     }
 
 

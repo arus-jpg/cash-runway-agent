@@ -5,3 +5,4 @@ min_cash_policy,3000000
 base_weekly_billings,300000
 dso_days,48
 weekly_vendor_run_rate,120000
+monthly_net_new_arr,800000

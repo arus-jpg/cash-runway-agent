@@ -46,6 +46,7 @@ class Company:
     base_weekly_billings: float  # new invoices issued per week
     dso_days: int  # days from new invoice to cash
     weekly_vendor_run_rate: float = 0.0  # un-billed vendor spend per week beyond the known-bill window
+    monthly_net_new_arr: float = 0.0  # net new ARR booked per month (for burn multiple); 0 = unknown
     invoices: list[Invoice] = field(default_factory=list)
     bills: list[Bill] = field(default_factory=list)
     recurring: list[Recurring] = field(default_factory=list)
@@ -92,6 +93,7 @@ def generate(seed: int = 7) -> Company:
         base_weekly_billings=300_000,
         dso_days=48,
         weekly_vendor_run_rate=120_000,
+        monthly_net_new_arr=800_000,
         invoices=inv, bills=bills, recurring=recurring,
     )
 
@@ -171,7 +173,8 @@ def export_csvs(c: Company, outdir: Path) -> None:
     _write(outdir / "assumptions.csv", ["Key", "Value"],
            [["company_name", c.name], ["as_of", _qb(c.as_of)], ["min_cash_policy", c.min_cash_policy],
             ["base_weekly_billings", c.base_weekly_billings], ["dso_days", c.dso_days],
-            ["weekly_vendor_run_rate", c.weekly_vendor_run_rate]])
+            ["weekly_vendor_run_rate", c.weekly_vendor_run_rate],
+            ["monthly_net_new_arr", c.monthly_net_new_arr]])
 
 
 def load_csvs(d: Path) -> Company:
@@ -202,4 +205,5 @@ def load_csvs(d: Path) -> Company:
         first_payroll_date=next_pay.isoformat(),
         base_weekly_billings=float(a["base_weekly_billings"]), dso_days=int(float(a["dso_days"])),
         weekly_vendor_run_rate=float(a.get("weekly_vendor_run_rate", 0)),
+        monthly_net_new_arr=float(a.get("monthly_net_new_arr", 0)),
         invoices=invoices, bills=bills, recurring=recurring)

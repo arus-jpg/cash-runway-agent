@@ -11,8 +11,11 @@
     --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
     --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
     --series:#2a78d6; --series-fill:rgba(42,120,214,.12);
+    --band-fill:rgba(42,120,214,.16); --band-edge:rgba(42,120,214,.45);
     --good:#0ca30c; --good-text:#006300; --critical:#d03b3b; --warning:#fab219;
     --crit-fill:rgba(208,59,59,.10);
+    --flow-in:#008300; --flow-payroll:#2a78d6; --flow-ap:#eda100;
+    --flow-opex:#4a3aa7; --flow-other:#e87ba4;
   }
   @media (prefers-color-scheme: dark){
     :root:where(:not([data-theme="light"])){
@@ -21,8 +24,11 @@
       --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
       --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
       --series:#3987e5; --series-fill:rgba(57,135,229,.16);
+      --band-fill:rgba(57,135,229,.22); --band-edge:rgba(57,135,229,.5);
       --good:#0ca30c; --good-text:#0ca30c; --critical:#e66767; --warning:#fab219;
       --crit-fill:rgba(230,103,103,.14);
+      --flow-in:#008300; --flow-payroll:#3987e5; --flow-ap:#c98500;
+      --flow-opex:#9085e9; --flow-other:#d55181;
     }
   }
   :root[data-theme="dark"]{
@@ -31,8 +37,11 @@
     --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
     --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
     --series:#3987e5; --series-fill:rgba(57,135,229,.16);
+    --band-fill:rgba(57,135,229,.22); --band-edge:rgba(57,135,229,.5);
     --good:#0ca30c; --good-text:#0ca30c; --critical:#e66767; --warning:#fab219;
     --crit-fill:rgba(230,103,103,.14);
+    --flow-in:#008300; --flow-payroll:#3987e5; --flow-ap:#c98500;
+    --flow-opex:#9085e9; --flow-other:#d55181;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--page);color:var(--ink);
@@ -52,6 +61,7 @@
     padding:18px 18px 16px;margin-top:16px}
   .sec-title{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);
     margin:0 0 14px;font-weight:600}
+  .muted-note{text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted);opacity:.85}
   /* KPI tiles */
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
     background:var(--border);border:1px solid var(--border);border-radius:14px;overflow:hidden;margin-top:16px}
@@ -110,15 +120,34 @@
   <div class="kpis" id="kpis"></div>
 
   <section>
-    <p class="sec-title">Ending cash by week</p>
+    <p class="sec-title">Ending cash by week <span class="muted-note">(shaded = 80% Monte&nbsp;Carlo range, 2,000 runs)</span></p>
     <div class="chartbox">
-      <svg id="chart" viewBox="0 0 880 360" role="img" aria-label="Weekly ending cash vs minimum cash policy"></svg>
+      <svg id="chart" viewBox="0 0 880 360" role="img" aria-label="Weekly ending cash with Monte Carlo confidence band vs minimum cash policy"></svg>
       <div class="tip" id="tip"></div>
     </div>
     <div class="legend">
-      <span><i class="swatch" style="background:var(--series)"></i> Ending cash</span>
+      <span><i class="swatch" style="background:var(--series)"></i> Expected cash</span>
+      <span><i class="swatch" style="background:var(--band-fill);border:1px solid var(--band-edge)"></i> P10&ndash;P90 range</span>
       <span><i class="swatch dash"></i> Min-cash policy</span>
       <span><i class="swatch" style="background:var(--crit-fill);border:1px solid var(--critical)"></i> Below policy</span>
+    </div>
+  </section>
+
+  <div class="kpis" id="burn"></div>
+
+  <section>
+    <p class="sec-title">Weekly sources &amp; uses &mdash; <span id="flow-scen"></span></p>
+    <div class="chartbox">
+      <svg id="flowchart" viewBox="0 0 880 320" role="img" aria-label="Weekly cash inflows and outflows"></svg>
+      <div class="tip" id="tip2"></div>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--flow-in)"></i> Receipts</span>
+      <span><i class="swatch" style="background:var(--flow-payroll)"></i> Payroll</span>
+      <span><i class="swatch" style="background:var(--flow-ap)"></i> AP</span>
+      <span><i class="swatch" style="background:var(--flow-opex)"></i> Opex</span>
+      <span><i class="swatch" style="background:var(--flow-other)"></i> Other out</span>
+      <span><i class="swatch" style="background:var(--ink2)"></i> Net flow</span>
     </div>
   </section>
 
@@ -182,20 +211,24 @@ let DATA, current;
 
 function kpis(){
   const s = DATA.scenarios[current].summary;
+  const band = DATA.scenarios[current].band;
   const policy = DATA.min_cash_policy;
   const breach = s.first_week_below_policy;
   const neg = s.first_week_cash_negative;
   const lowClass = s.lowest_cash < policy ? "crit" : "good";
   const runway = s.runway_months_at_current_burn;
+  const pb = band.prob_breach_policy;                 // 0..1
+  const pbClass = pb>=0.5 ? "crit" : pb>=0.15 ? "" : "good";
   const tiles = [
     {label:"Opening cash", val:fmtM(s.opening_cash)},
     {label:"Week-13 cash", val:fmtM(s.ending_cash_week13),
       cls:s.ending_cash_week13<policy?"crit":""},
     {label:"Lowest cash", val:fmtM(s.lowest_cash), cls:lowClass,
-      note:`week ${s.lowest_cash_week}`},
-    {label:"Avg weekly burn", val:fmtK(s.avg_weekly_net_burn)},
+      note:`wk ${s.lowest_cash_week} · P10–P90 ${fmtM(band.worst_case_low_p10)}–${fmtM(band.best_case_low_p90)}`},
+    {label:"Prob. of breach", val:(pb*100).toFixed(pb>=0.1?0:1)+"%", cls:pbClass,
+      note:"policy breach in 13 wks"},
     {label:"Runway", val: runway==null ? "Cash gen." : runway+" mo",
-      note:"at current burn"},
+      note:"to $0 at current burn"},
     {label:"Min-cash policy", val:fmtM(policy),
       pill: neg!=null ? {c:"bad",t:`cash-out wk ${neg}`}
            : breach!=null ? {c:"bad",t:`breached wk ${breach}`}
@@ -212,18 +245,23 @@ function kpis(){
 
 function chart(){
   const rows = DATA.scenarios[current].rows;
+  const band = DATA.scenarios[current].band;
   const policy = DATA.min_cash_policy;
   const W=880,H=360, L=64,R=18,T=22,B=40;
   const pw=W-L-R, ph=H-T-B;
   const n=rows.length;
-  const vals = rows.map(r=>r.ending_cash).concat([policy, DATA.opening_cash]);
+  const vals = rows.map(r=>r.ending_cash)
+    .concat(band.p90).concat(band.p10).concat([policy, DATA.opening_cash]);
   const ymax = Math.max(...vals)*1.06, ymin=0;
   const x = i => L + (n===1?pw/2:pw*i/(n-1));
   const y = v => T + ph*(1-(v-ymin)/(ymax-ymin));
   const line = rows.map((r,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(r.ending_cash).toFixed(1)}`).join("");
-  const area = `M${x(0).toFixed(1)},${y(0)} ` +
-    rows.map((r,i)=>`L${x(i).toFixed(1)},${y(r.ending_cash).toFixed(1)}`).join(" ") +
-    ` L${x(n-1).toFixed(1)},${y(0)} Z`;
+  // Monte Carlo P10–P90 band: top along P90 (L→R), back along P10 (R→L)
+  const bandPath =
+    "M" + band.p90.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" L") +
+    " L" + band.p10.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).reverse().join(" L") + " Z";
+  const p10line = "M" + band.p10.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" L");
+  const p90line = "M" + band.p90.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" L");
   // y gridlines
   const ticks=[]; const step = ymax<=4e6?1e6:2e6;
   for(let v=0; v<=ymax; v+=step) ticks.push(v);
@@ -268,7 +306,9 @@ function chart(){
 
   document.getElementById("chart").innerHTML = `
     ${grid}
-    <path d="${area}" fill="var(--series-fill)"/>
+    <path d="${bandPath}" fill="var(--band-fill)"/>
+    <path d="${p10line}" fill="none" stroke="var(--band-edge)" stroke-width="1" stroke-dasharray="2 3"/>
+    <path d="${p90line}" fill="none" stroke="var(--band-edge)" stroke-width="1" stroke-dasharray="2 3"/>
     ${belowArea}
     <line x1="${L}" y1="${py}" x2="${W-R}" y2="${py}" stroke="var(--critical)" stroke-width="2" stroke-dasharray="5 4"/>
     <text class="axis-txt" x="${W-R}" y="${(+py-6)}" text-anchor="end" fill="var(--critical)">policy ${fmtM(policy)}</text>
@@ -290,7 +330,8 @@ function chart(){
     cross.setAttribute("x1",x(i)); cross.setAttribute("x2",x(i)); cross.setAttribute("opacity","1");
     const below=r.ending_cash<policy;
     tip.innerHTML=`<div class="hd">Week ${i} &middot; ${dShort(r.week_start)}</div>
-      <div class="r"><span class="k">Ending</span><span class="v" style="color:${below?'var(--critical)':'var(--ink)'}">${fmtFull(r.ending_cash)}</span></div>
+      <div class="r"><span class="k">Expected</span><span class="v" style="color:${below?'var(--critical)':'var(--ink)'}">${fmtFull(r.ending_cash)}</span></div>
+      <div class="r"><span class="k">P10–P90</span><span class="v">${fmtM(band.p10[i])}–${fmtM(band.p90[i])}</span></div>
       <div class="r"><span class="k">Receipts</span><span class="v">${fmtFull(r.receipts)}</span></div>
       <div class="r"><span class="k">Payroll</span><span class="v">−${fmtFull(r.payroll)}</span></div>
       <div class="r"><span class="k">AP</span><span class="v">−${fmtFull(r.ap)}</span></div>
@@ -362,11 +403,100 @@ function scenarioButtons(){
     b.addEventListener("click",()=>select(b.dataset.scen)));
 }
 
+function burnStats(){
+  const s=DATA.scenarios[current].summary;
+  const bm=s.burn_multiple;
+  const bmClass = bm==null ? "" : (bm>2 ? "crit" : (bm<=1 ? "good" : ""));
+  const toPolicy=s.runway_months_to_policy;
+  const tiles=[
+    {label:"Net burn / mo", val:fmtM(s.net_burn_monthly), note:"cash out − receipts"},
+    {label:"Gross burn / mo", val:fmtM(s.gross_burn_monthly), note:"total cash out"},
+    {label:"Runway to policy", val: toPolicy==null?"Stable":toPolicy+" mo",
+      cls: toPolicy!=null && toPolicy<3 ? "crit" : "",
+      note:`to ${fmtM(s.min_cash_policy)} floor`},
+    {label:"Runway to $0", val: s.runway_months_to_zero==null?"Stable":s.runway_months_to_zero+" mo",
+      note:"at current net burn"},
+    {label:"Burn multiple", val: bm==null?"n/a":bm.toFixed(2)+"×", cls:bmClass,
+      note:`net burn ÷ ${fmtM(s.monthly_net_new_arr)} ARR/mo`},
+  ];
+  document.getElementById("burn").innerHTML = tiles.map(t=>`
+    <div class="kpi">
+      <div class="label">${t.label}</div>
+      <div class="val ${t.cls||""}">${t.val}</div>
+      ${t.note?`<div class="note">${t.note}</div>`:""}
+    </div>`).join("");
+}
+
+function flowChart(){
+  const rows=DATA.scenarios[current].rows;
+  document.getElementById("flow-scen").textContent=LABELS[current]||current;
+  const W=880,H=320, L=64,R=18,T=18,B=40;
+  const pw=W-L-R, ph=H-T-B, n=rows.length;
+  const outOf = r => r.payroll+r.ap+r.opex+r.other_out;
+  const maxIn = Math.max(...rows.map(r=>r.receipts), 1);
+  const maxOut = Math.max(...rows.map(outOf), 1);
+  const top = maxIn*1.08, bot = -maxOut*1.08;
+  const y = v => T + ph*(top - v)/(top - bot);
+  const zero = y(0);
+  const bw = pw/n, barW = bw*0.58;
+  const xc = i => L + bw*(i+0.5);
+  // gridlines on a nice $ step
+  const stepRaw=(top-bot)/5, p=Math.pow(10,Math.floor(Math.log10(stepRaw)));
+  const gstep=Math.ceil(stepRaw/p)*p;
+  let ticks=[]; for(let v=Math.ceil(bot/gstep)*gstep; v<=top; v+=gstep) ticks.push(v);
+  const grid = ticks.map(v=>`
+    <line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-R}" y2="${y(v).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>
+    <text class="axis-txt" x="${L-8}" y="${(y(v)+4).toFixed(1)}" text-anchor="end">${v===0?"0":(v<0?"−":"")+"$"+(Math.abs(v)/1e6).toFixed(1)+"M"}</text>`).join("");
+  const GAP=2;
+  const segsFor = r => [
+    {v:r.payroll,c:"var(--flow-payroll)"},{v:r.ap,c:"var(--flow-ap)"},
+    {v:r.opex,c:"var(--flow-opex)"},{v:r.other_out,c:"var(--flow-other)"},
+  ];
+  const bars = rows.map((r,i)=>{
+    const x0=xc(i)-barW/2; let parts="";
+    if(r.receipts>0){ const yt=y(r.receipts), h=Math.max(0,zero-yt-GAP);
+      parts+=`<rect x="${x0.toFixed(1)}" y="${yt.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="var(--flow-in)"/>`; }
+    let acc=0;
+    segsFor(r).forEach(s=>{ if(s.v<=0) return;
+      const yTop=y(-acc), yBot=y(-acc-s.v), h=Math.max(0,yBot-yTop-GAP);
+      parts+=`<rect x="${x0.toFixed(1)}" y="${(yTop+GAP).toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${s.c}"/>`;
+      acc+=s.v; });
+    return parts;
+  }).join("");
+  const netPath="M"+rows.map((r,i)=>`${xc(i).toFixed(1)},${y(r.net_cash_flow).toFixed(1)}`).join(" L");
+  const netDots=rows.map((r,i)=>`<circle cx="${xc(i).toFixed(1)}" cy="${y(r.net_cash_flow).toFixed(1)}" r="3" fill="var(--surface)" stroke="var(--ink2)" stroke-width="1.5"/>`).join("");
+  const xlab=rows.map((r,i)=>`<text class="axis-txt" x="${xc(i).toFixed(1)}" y="${H-B+22}" text-anchor="middle">W${i}</text>`).join("");
+  document.getElementById("flowchart").innerHTML=`
+    ${grid}
+    ${bars}
+    <line x1="${L}" y1="${zero.toFixed(1)}" x2="${W-R}" y2="${zero.toFixed(1)}" stroke="var(--axis)" stroke-width="1.4"/>
+    <path d="${netPath}" fill="none" stroke="var(--ink2)" stroke-width="2"/>
+    ${netDots}
+    ${xlab}
+    <rect id="fhit" x="${L}" y="${T}" width="${pw}" height="${ph}" fill="transparent"/>`;
+  const svg=document.getElementById("flowchart"), tip=document.getElementById("tip2"), box=svg.parentElement;
+  const hit=document.getElementById("fhit");
+  hit.addEventListener("mousemove",ev=>{
+    const pt=svg.getBoundingClientRect(); const sx=(ev.clientX-pt.left)/pt.width*W;
+    let i=Math.floor((sx-L)/bw); i=Math.max(0,Math.min(n-1,i)); const r=rows[i];
+    tip.innerHTML=`<div class="hd">Week ${i} &middot; ${dShort(r.week_start)}</div>
+      <div class="r"><span class="k">Receipts</span><span class="v" style="color:var(--flow-in)">+${fmtFull(r.receipts)}</span></div>
+      <div class="r"><span class="k">Payroll</span><span class="v">−${fmtFull(r.payroll)}</span></div>
+      <div class="r"><span class="k">AP</span><span class="v">−${fmtFull(r.ap)}</span></div>
+      <div class="r"><span class="k">Opex</span><span class="v">−${fmtFull(r.opex)}</span></div>
+      ${r.other_out?`<div class="r"><span class="k">Other</span><span class="v">−${fmtFull(r.other_out)}</span></div>`:""}
+      <div class="r" style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px"><span class="k">Net</span><span class="v" style="color:${r.net_cash_flow<0?'var(--critical)':'var(--good-text)'}">${r.net_cash_flow<0?'':'+'}${fmtFull(r.net_cash_flow)}</span></div>`;
+    const bx=box.getBoundingClientRect(); const px=xc(i)/W*bx.width;
+    tip.style.left=Math.min(bx.width-170,Math.max(0,px+10))+"px"; tip.style.top="8px"; tip.style.opacity="1";
+  });
+  hit.addEventListener("mouseleave",()=>tip.style.opacity="0");
+}
+
 function select(scen){
   current=scen;
   document.querySelectorAll("#scenarios button").forEach(b=>
     b.setAttribute("aria-pressed", b.dataset.scen===scen));
-  kpis(); chart(); weekly();
+  kpis(); burnStats(); chart(); flowChart(); weekly();
 }
 
 function init(d){
@@ -558,10 +688,72 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
         "lowest_cash": 3589568,
         "lowest_cash_week": 12,
         "avg_weekly_net_burn": 285418,
+        "avg_weekly_gross_burn": 696000,
+        "net_burn_monthly": 1236811,
+        "gross_burn_monthly": 3016000,
         "runway_months_at_current_burn": 2.9,
+        "runway_weeks_to_zero": 25.6,
+        "runway_months_to_zero": 5.9,
+        "runway_weeks_to_policy": 15.1,
+        "runway_months_to_policy": 3.5,
+        "monthly_net_new_arr": 800000,
+        "burn_multiple": 1.55,
         "min_cash_policy": 3000000,
         "first_week_below_policy": null,
         "first_week_cash_negative": null
+      },
+      "band": {
+        "n": 2000,
+        "p10": [
+          7319900,
+          7342700,
+          6309400,
+          5975700,
+          5294300,
+          5335650,
+          4603770,
+          4285765,
+          3846714,
+          4146946,
+          3729623,
+          3793085,
+          3267251
+        ],
+        "p50": [
+          7635900,
+          7676200,
+          6666550,
+          6359500,
+          5698100,
+          5715600,
+          4975750,
+          4648204,
+          4196098,
+          4510714,
+          4067350,
+          4117768,
+          3603160
+        ],
+        "p90": [
+          7931170,
+          8006010,
+          7043700,
+          6764200,
+          6047900,
+          6019100,
+          5253450,
+          4938330,
+          4475070,
+          4772938,
+          4313425,
+          4361444,
+          3850896
+        ],
+        "prob_breach_policy": 0.017,
+        "prob_cash_negative": 0.0,
+        "worst_case_low_p10": 3267251,
+        "median_low": 3603160,
+        "best_case_low_p90": 3850896
       }
     },
     "slow_collections": {
@@ -729,10 +921,72 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
         "lowest_cash": 2989568,
         "lowest_cash_week": 12,
         "avg_weekly_net_burn": 331572,
+        "avg_weekly_gross_burn": 696000,
+        "net_burn_monthly": 1436811,
+        "gross_burn_monthly": 3016000,
         "runway_months_at_current_burn": 2.1,
+        "runway_weeks_to_zero": 22.0,
+        "runway_months_to_zero": 5.1,
+        "runway_weeks_to_policy": 12,
+        "runway_months_to_policy": 2.8,
+        "monthly_net_new_arr": 800000,
+        "burn_multiple": 1.8,
         "min_cash_policy": 3000000,
         "first_week_below_policy": 12,
         "first_week_cash_negative": null
+      },
+      "band": {
+        "n": 2000,
+        "p10": [
+          6835710,
+          6857400,
+          5773930,
+          5353480,
+          4610700,
+          4681700,
+          4009630,
+          3492700,
+          2808790,
+          3216745,
+          2887087,
+          3057722,
+          2627613
+        ],
+        "p50": [
+          7095900,
+          7166250,
+          6081100,
+          5694500,
+          4983600,
+          5074400,
+          4399000,
+          3861700,
+          3164600,
+          3558968,
+          3239153,
+          3401197,
+          2959273
+        ],
+        "p90": [
+          7390500,
+          7419900,
+          6375700,
+          5999400,
+          5346000,
+          5408900,
+          4737790,
+          4154500,
+          3443800,
+          3854748,
+          3518396,
+          3670348,
+          3210477
+        ],
+        "prob_breach_policy": 0.588,
+        "prob_cash_negative": 0.0,
+        "worst_case_low_p10": 2610594,
+        "median_low": 2949054,
+        "best_case_low_p90": 3194260
       }
     },
     "revenue_down_20": {
@@ -900,10 +1154,72 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
         "lowest_cash": 3229568,
         "lowest_cash_week": 12,
         "avg_weekly_net_burn": 313110,
+        "avg_weekly_gross_burn": 696000,
+        "net_burn_monthly": 1356811,
+        "gross_burn_monthly": 3016000,
         "runway_months_at_current_burn": 2.4,
+        "runway_weeks_to_zero": 23.3,
+        "runway_months_to_zero": 5.4,
+        "runway_weeks_to_policy": 13.7,
+        "runway_months_to_policy": 3.2,
+        "monthly_net_new_arr": 800000,
+        "burn_multiple": 1.7,
         "min_cash_policy": 3000000,
         "first_week_below_policy": null,
         "first_week_cash_negative": null
+      },
+      "band": {
+        "n": 2000,
+        "p10": [
+          7319900,
+          7342700,
+          6309400,
+          5975700,
+          5294300,
+          5335650,
+          4603770,
+          4229085,
+          3731355,
+          3973263,
+          3497569,
+          3498599,
+          2920244
+        ],
+        "p50": [
+          7635900,
+          7676200,
+          6666550,
+          6359500,
+          5698100,
+          5715600,
+          4975750,
+          4588182,
+          4076019,
+          4331234,
+          3829010,
+          3820999,
+          3247389
+        ],
+        "p90": [
+          7931170,
+          8006010,
+          7043700,
+          6764200,
+          6047900,
+          6019100,
+          5253450,
+          4875777,
+          4353513,
+          4586206,
+          4068983,
+          4055211,
+          3484320
+        ],
+        "prob_breach_policy": 0.163,
+        "prob_cash_negative": 0.0,
+        "worst_case_low_p10": 2920244,
+        "median_low": 3247389,
+        "best_case_low_p90": 3484320
       }
     },
     "hiring_plan": {
@@ -1071,10 +1387,72 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
         "lowest_cash": 3091106,
         "lowest_cash_week": 12,
         "avg_weekly_net_burn": 323761,
+        "avg_weekly_gross_burn": 734343,
+        "net_burn_monthly": 1402964,
+        "gross_burn_monthly": 3182153,
         "runway_months_at_current_burn": 2.2,
+        "runway_weeks_to_zero": 22.5,
+        "runway_months_to_zero": 5.2,
+        "runway_weeks_to_policy": 13.3,
+        "runway_months_to_policy": 3.1,
+        "monthly_net_new_arr": 800000,
+        "burn_multiple": 1.75,
         "min_cash_policy": 3000000,
         "first_week_below_policy": null,
         "first_week_cash_negative": null
+      },
+      "band": {
+        "n": 2000,
+        "p10": [
+          7319900,
+          7342700,
+          6309400,
+          5975700,
+          5194608,
+          5235958,
+          4404386,
+          4086381,
+          3547638,
+          3847870,
+          3330855,
+          3394317,
+          2768791
+        ],
+        "p50": [
+          7635900,
+          7676200,
+          6666550,
+          6359500,
+          5598408,
+          5615908,
+          4776366,
+          4448820,
+          3897022,
+          4211638,
+          3668582,
+          3719000,
+          3104700
+        ],
+        "p90": [
+          7931170,
+          8006010,
+          7043700,
+          6764200,
+          5948208,
+          5919408,
+          5054066,
+          4738946,
+          4175994,
+          4473862,
+          3914657,
+          3962676,
+          3352436
+        ],
+        "prob_breach_policy": 0.325,
+        "prob_cash_negative": 0.0,
+        "worst_case_low_p10": 2768791,
+        "median_low": 3104700,
+        "best_case_low_p90": 3352436
       }
     },
     "cost_cut_10": {
@@ -1242,10 +1620,72 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
         "lowest_cash": 3669768,
         "lowest_cash_week": 12,
         "avg_weekly_net_burn": 279249,
+        "avg_weekly_gross_burn": 689831,
+        "net_burn_monthly": 1210077,
+        "gross_burn_monthly": 2989267,
         "runway_months_at_current_burn": 3.0,
+        "runway_weeks_to_zero": 26.1,
+        "runway_months_to_zero": 6.0,
+        "runway_weeks_to_policy": 15.4,
+        "runway_months_to_policy": 3.6,
+        "monthly_net_new_arr": 800000,
+        "burn_multiple": 1.51,
         "min_cash_policy": 3000000,
         "first_week_below_policy": null,
         "first_week_cash_negative": null
+      },
+      "band": {
+        "n": 2000,
+        "p10": [
+          7319900,
+          7342700,
+          6325200,
+          5991500,
+          5327300,
+          5368650,
+          4646770,
+          4338365,
+          3911114,
+          4211346,
+          3794023,
+          3873285,
+          3347451
+        ],
+        "p50": [
+          7635900,
+          7676200,
+          6682350,
+          6375300,
+          5731100,
+          5748600,
+          5018750,
+          4700804,
+          4260498,
+          4575114,
+          4131750,
+          4197968,
+          3683360
+        ],
+        "p90": [
+          7931170,
+          8006010,
+          7059500,
+          6780000,
+          6080900,
+          6052100,
+          5296450,
+          4990930,
+          4539470,
+          4837338,
+          4377825,
+          4441644,
+          3931096
+        ],
+        "prob_breach_policy": 0.011,
+        "prob_cash_negative": 0.0,
+        "worst_case_low_p10": 3347451,
+        "median_low": 3683360,
+        "best_case_low_p90": 3931096
       }
     },
     "downside": {
@@ -1413,10 +1853,72 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
         "lowest_cash": 2498736,
         "lowest_cash_week": 12,
         "avg_weekly_net_burn": 369328,
+        "avg_weekly_gross_burn": 696000,
+        "net_burn_monthly": 1600421,
+        "gross_burn_monthly": 3016000,
         "runway_months_at_current_burn": 1.6,
+        "runway_weeks_to_zero": 19.8,
+        "runway_months_to_zero": 4.6,
+        "runway_weeks_to_policy": 8,
+        "runway_months_to_policy": 1.8,
+        "monthly_net_new_arr": 800000,
+        "burn_multiple": 2.0,
         "min_cash_policy": 3000000,
         "first_week_below_policy": 8,
         "first_week_cash_negative": null
+      },
+      "band": {
+        "n": 2000,
+        "p10": [
+          6743300,
+          6714700,
+          5629600,
+          5175600,
+          4427000,
+          4466090,
+          3765500,
+          3222100,
+          2524470,
+          2837372,
+          2435499,
+          2547047,
+          2050638
+        ],
+        "p50": [
+          7016700,
+          7053950,
+          5967500,
+          5553800,
+          4836250,
+          4905250,
+          4208600,
+          3654500,
+          2954200,
+          3269386,
+          2873055,
+          2966058,
+          2471972
+        ],
+        "p90": [
+          7333500,
+          7352880,
+          6298680,
+          5895390,
+          5224200,
+          5288200,
+          4597130,
+          4023340,
+          3300670,
+          3640375,
+          3224869,
+          3308312,
+          2808266
+        ],
+        "prob_breach_policy": 0.992,
+        "prob_cash_negative": 0.0,
+        "worst_case_low_p10": 2050638,
+        "median_low": 2471823,
+        "best_case_low_p90": 2807550
       }
     }
   },
@@ -1541,7 +2043,8 @@ fetch("data.json").then(r=>r.json()).then(init).catch(()=>{
       "collect_risk": 0.04,
       "expected_loss": 11436
     }
-  ]
+  ],
+  "monthly_net_new_arr": 800000
 }
 </script>
 </body>

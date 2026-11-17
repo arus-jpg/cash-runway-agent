@@ -25,8 +25,16 @@ python -m runway.cli chat                     # multi-turn
 
 ## Dashboard (GitHub Pages)
 
-A static 13-week runway dashboard lives in `docs/` — KPI tiles, an ending-cash chart with
-the min-cash policy line, a weekly cash-flow table, scenario comparison, and top AR risks.
+A static 13-week runway dashboard lives in `docs/`:
+
+- **KPI tiles** — opening/week-13/lowest cash, probability of breaching the policy, runway, policy status.
+- **Ending-cash chart** with a **Monte Carlo P10–P90 confidence band** (2,000 runs over collection
+  timing/realization and billings size) around the expected line, plus the min-cash policy threshold.
+- **Burn & efficiency** — net vs gross monthly burn, runway to the policy floor and to $0, and
+  **burn multiple** (net burn ÷ net-new ARR).
+- **Weekly sources & uses** — stacked inflows/outflows with a net-flow overlay.
+- Weekly cash-flow table, scenario comparison, and top AR collection risks.
+
 It reads `docs/data.json`, so regenerating the forecast refreshes the page:
 
 ```bash
