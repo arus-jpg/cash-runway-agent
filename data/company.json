@@ -1,0 +1,344 @@
+{
+  "name": "Acme Robotics (synthetic)",
+  "as_of": "2026-11-16",
+  "opening_cash": 7300000,
+  "min_cash_policy": 3000000,
+  "payroll_per_period": 700000,
+  "first_payroll_date": "2026-11-20",
+  "base_weekly_billings": 300000,
+  "dso_days": 48,
+  "weekly_vendor_run_rate": 120000,
+  "invoices": [
+    {
+      "customer": "Atlas Manufacturing",
+      "amount": 285900.0,
+      "due_date": "2026-12-01",
+      "typical_days_late": 8,
+      "collect_risk": 0.04
+    },
+    {
+      "customer": "Cobalt Mining",
+      "amount": 55400.0,
+      "due_date": "2026-12-25",
+      "typical_days_late": 7,
+      "collect_risk": 0.12
+    },
+    {
+      "customer": "Northwind Defense",
+      "amount": 275600.0,
+      "due_date": "2026-11-08",
+      "typical_days_late": 26,
+      "collect_risk": 0.01
+    },
+    {
+      "customer": "Helix Aerospace",
+      "amount": 95000.0,
+      "due_date": "2026-12-21",
+      "typical_days_late": 15,
+      "collect_risk": 0.02
+    },
+    {
+      "customer": "Pioneer Utilities",
+      "amount": 46000.0,
+      "due_date": "2026-12-23",
+      "typical_days_late": 19,
+      "collect_risk": 0.01
+    },
+    {
+      "customer": "Nimbus Telecom",
+      "amount": 187400.0,
+      "due_date": "2026-10-19",
+      "typical_days_late": 18,
+      "collect_risk": 0.03
+    },
+    {
+      "customer": "Redwood Retail",
+      "amount": 188100.0,
+      "due_date": "2026-10-18",
+      "typical_days_late": 16,
+      "collect_risk": 0.15
+    },
+    {
+      "customer": "Brightline Energy",
+      "amount": 108200.0,
+      "due_date": "2026-10-30",
+      "typical_days_late": 11,
+      "collect_risk": 0.03
+    },
+    {
+      "customer": "Cobalt Mining",
+      "amount": 61800.0,
+      "due_date": "2026-11-20",
+      "typical_days_late": 0,
+      "collect_risk": 0.12
+    },
+    {
+      "customer": "Helix Aerospace",
+      "amount": 187000.0,
+      "due_date": "2027-01-01",
+      "typical_days_late": 4,
+      "collect_risk": 0.02
+    },
+    {
+      "customer": "Vertex Logistics",
+      "amount": 130500.0,
+      "due_date": "2026-12-21",
+      "typical_days_late": 7,
+      "collect_risk": 0.05
+    },
+    {
+      "customer": "Redwood Retail",
+      "amount": 85600.0,
+      "due_date": "2027-01-07",
+      "typical_days_late": 0,
+      "collect_risk": 0.15
+    },
+    {
+      "customer": "Cobalt Mining",
+      "amount": 145400.0,
+      "due_date": "2026-11-21",
+      "typical_days_late": 0,
+      "collect_risk": 0.12
+    },
+    {
+      "customer": "Atlas Manufacturing",
+      "amount": 110900.0,
+      "due_date": "2026-11-04",
+      "typical_days_late": 18,
+      "collect_risk": 0.04
+    },
+    {
+      "customer": "Granite Construction",
+      "amount": 240600.0,
+      "due_date": "2026-10-22",
+      "typical_days_late": 0,
+      "collect_risk": 0.1
+    },
+    {
+      "customer": "Atlas Manufacturing",
+      "amount": 227000.0,
+      "due_date": "2026-11-17",
+      "typical_days_late": 4,
+      "collect_risk": 0.04
+    },
+    {
+      "customer": "Redwood Retail",
+      "amount": 294600.0,
+      "due_date": "2026-10-27",
+      "typical_days_late": 3,
+      "collect_risk": 0.15
+    },
+    {
+      "customer": "Atlas Manufacturing",
+      "amount": 71000.0,
+      "due_date": "2026-12-13",
+      "typical_days_late": 11,
+      "collect_risk": 0.04
+    },
+    {
+      "customer": "Pioneer Utilities",
+      "amount": 40600.0,
+      "due_date": "2027-01-05",
+      "typical_days_late": 27,
+      "collect_risk": 0.01
+    },
+    {
+      "customer": "Atlas Manufacturing",
+      "amount": 121800.0,
+      "due_date": "2026-11-25",
+      "typical_days_late": 20,
+      "collect_risk": 0.04
+    },
+    {
+      "customer": "Redwood Retail",
+      "amount": 164100.0,
+      "due_date": "2026-12-09",
+      "typical_days_late": 17,
+      "collect_risk": 0.15
+    },
+    {
+      "customer": "Orion Health",
+      "amount": 158000.0,
+      "due_date": "2027-01-05",
+      "typical_days_late": 14,
+      "collect_risk": 0.02
+    },
+    {
+      "customer": "Helix Aerospace",
+      "amount": 46400.0,
+      "due_date": "2027-01-09",
+      "typical_days_late": 5,
+      "collect_risk": 0.02
+    },
+    {
+      "customer": "Nimbus Telecom",
+      "amount": 251900.0,
+      "due_date": "2026-11-17",
+      "typical_days_late": 29,
+      "collect_risk": 0.03
+    },
+    {
+      "customer": "Granite Construction",
+      "amount": 134200.0,
+      "due_date": "2027-01-05",
+      "typical_days_late": 0,
+      "collect_risk": 0.1
+    },
+    {
+      "customer": "Atlas Manufacturing",
+      "amount": 75400.0,
+      "due_date": "2026-10-26",
+      "typical_days_late": 39,
+      "collect_risk": 0.04
+    }
+  ],
+  "bills": [
+    {
+      "vendor": "Gusto",
+      "amount": 22900.0,
+      "due_date": "2026-12-30"
+    },
+    {
+      "vendor": "Deloitte",
+      "amount": 40600.0,
+      "due_date": "2026-11-26"
+    },
+    {
+      "vendor": "WeWork",
+      "amount": 106500.0,
+      "due_date": "2027-01-05"
+    },
+    {
+      "vendor": "Gusto",
+      "amount": 28300.0,
+      "due_date": "2026-12-09"
+    },
+    {
+      "vendor": "WeWork",
+      "amount": 146500.0,
+      "due_date": "2027-01-06"
+    },
+    {
+      "vendor": "Salesforce",
+      "amount": 214500.0,
+      "due_date": "2027-01-05"
+    },
+    {
+      "vendor": "Datadog",
+      "amount": 78200.0,
+      "due_date": "2026-12-07"
+    },
+    {
+      "vendor": "Wilson Sonsini",
+      "amount": 180000.0,
+      "due_date": "2026-12-05"
+    },
+    {
+      "vendor": "Workday",
+      "amount": 46000.0,
+      "due_date": "2026-11-22"
+    },
+    {
+      "vendor": "Salesforce",
+      "amount": 66500.0,
+      "due_date": "2026-11-25"
+    },
+    {
+      "vendor": "AWS",
+      "amount": 130200.0,
+      "due_date": "2026-12-18"
+    },
+    {
+      "vendor": "Salesforce",
+      "amount": 74200.0,
+      "due_date": "2026-11-11"
+    },
+    {
+      "vendor": "Salesforce",
+      "amount": 113600.0,
+      "due_date": "2026-12-04"
+    },
+    {
+      "vendor": "Snowflake",
+      "amount": 150700.0,
+      "due_date": "2027-01-10"
+    },
+    {
+      "vendor": "Salesforce",
+      "amount": 182000.0,
+      "due_date": "2026-12-13"
+    },
+    {
+      "vendor": "Snowflake",
+      "amount": 173100.0,
+      "due_date": "2026-12-28"
+    },
+    {
+      "vendor": "AWS",
+      "amount": 123100.0,
+      "due_date": "2027-01-05"
+    },
+    {
+      "vendor": "Marsh McLennan",
+      "amount": 247900.0,
+      "due_date": "2026-12-24"
+    },
+    {
+      "vendor": "Marsh McLennan",
+      "amount": 148900.0,
+      "due_date": "2026-12-06"
+    },
+    {
+      "vendor": "WeWork",
+      "amount": 107300.0,
+      "due_date": "2026-12-11"
+    },
+    {
+      "vendor": "Okta",
+      "amount": 108900.0,
+      "due_date": "2026-11-23"
+    },
+    {
+      "vendor": "Azure",
+      "amount": 256100.0,
+      "due_date": "2026-12-09"
+    }
+  ],
+  "recurring": [
+    {
+      "name": "Office rent",
+      "amount": 62000,
+      "frequency": "monthly",
+      "day_of_month": 1,
+      "category": "facilities"
+    },
+    {
+      "name": "Cloud & SaaS",
+      "amount": 118000,
+      "frequency": "monthly",
+      "day_of_month": 15,
+      "category": "tech"
+    },
+    {
+      "name": "Benefits & 401k",
+      "amount": 96000,
+      "frequency": "monthly",
+      "day_of_month": 5,
+      "category": "people"
+    },
+    {
+      "name": "Insurance",
+      "amount": 54000,
+      "frequency": "quarterly",
+      "day_of_month": 20,
+      "category": "g&a"
+    },
+    {
+      "name": "Sales tax / other taxes",
+      "amount": 38000,
+      "frequency": "quarterly",
+      "day_of_month": 28,
+      "category": "tax"
+    }
+  ]
+}
